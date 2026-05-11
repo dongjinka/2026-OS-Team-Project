@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Large reference PDFs (논문 등) — share via 외부 공유 드라이브
+*.pdf
+
 # Python
 __pycache__/
 *.pyc
