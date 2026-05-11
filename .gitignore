@@ -1,0 +1,24 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+
+# xv6 build artifacts (in case anything escapes the subdir's own ignore)
+xv6-riscv/kernel/*.o
+xv6-riscv/kernel/*.d
+xv6-riscv/kernel/*.asm
+xv6-riscv/kernel/*.sym
+xv6-riscv/user/*.o
+xv6-riscv/user/*.d
+xv6-riscv/user/*.asm
+xv6-riscv/user/*.sym
+xv6-riscv/user/_*
+xv6-riscv/fs.img
+xv6-riscv/mkfs/mkfs
+
+# WSL alternate-data-stream artifacts
+*:Zone.Identifier*
