@@ -104,7 +104,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  int priority;                // Scheduling priority (0=highest, 20=lowest)
+  int priority;                // CFS nice value: -20..20 (negative = kernel-class)
   uint64 vruntime;             // CFS virtual runtime
   uint creation_tick;          // Tiebreak for equal vruntime
+  int is_agent;                // F7: sandboxed agent process
+  struct inode *jail_root;     // F7: chroot jail root inode (0 = no jail)
 };

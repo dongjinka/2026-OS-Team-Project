@@ -20,22 +20,63 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-// CFS helper: minimum vruntime among RUNNABLE+RUNNING processes, optionally
-// skipping one whose lock the caller already holds. Returns 0 when the table
-// is otherwise empty (e.g. boot of the very first process).
-static uint64
-min_vruntime_skip(struct proc *skip)
+// ───────────── CFS — Linux-like Completely Fair Scheduler ─────────────
+// Linux maps a process's "nice" value to a load weight; vruntime advances
+// inversely proportional to that weight, so a heavier (lower-nice) task
+// accumulates vruntime slowly and therefore receives a larger CPU share.
+// Here `priority` plays the role of nice. Range: -20..20.
+//   priority <  0  : kernel-class process (heaviest weights, runs first)
+//   priority 0..20 : user-class process   (10 = default)
+#define NICE_0_LOAD       1024
+#define CFS_WMULT         ((uint64)1 << 20)  // fixed-point scale for deltas
+#define CFS_WAKEUP_BONUS  1000000            // vruntime credit on I/O wakeup
+
+// Linux's sched_prio_to_weight, extended one slot for priority == 20.
+// Index = priority + 20  (index 0 == priority -20, index 20 == nice 0).
+static const uint cfs_weight[41] = {
+  88761, 71755, 56483, 46273, 36291,   // -20 .. -16
+  29154, 23254, 18705, 14949, 11916,   // -15 .. -11
+   9548,  7620,  6100,  4904,  3906,   // -10 ..  -6
+   3121,  2501,  1991,  1586,  1277,   //  -5 ..  -1
+   1024,   820,   655,   526,   423,   //   0 ..   4
+    335,   272,   215,   172,   137,   //   5 ..   9
+    110,    87,    70,    56,    45,   //  10 ..  14
+     36,    29,    23,    18,    15,   //  15 ..  19
+     12,                               //  20
+};
+
+// vruntime increment charged for one timer tick of execution.
+uint64
+cfs_vdelta(int priority)
 {
-  uint64 m = (uint64)-1;
-  struct proc *q;
-  for(q = proc; q < &proc[NPROC]; q++){
-    if(q == skip) continue;
-    acquire(&q->lock);
-    if((q->state == RUNNABLE || q->state == RUNNING) && q->vruntime < m)
-      m = q->vruntime;
-    release(&q->lock);
-  }
-  return (m == (uint64)-1) ? 0 : m;
+  int idx = priority + 20;
+  if(idx < 0)  idx = 0;
+  if(idx > 40) idx = 40;
+  return CFS_WMULT * NICE_0_LOAD / cfs_weight[idx];
+}
+
+// Global monotonically non-decreasing min_vruntime, mirroring Linux's
+// cfs_rq->min_vruntime. New and woken tasks are placed relative to it so
+// they neither starve others nor monopolize the CPU themselves.
+struct spinlock cfs_lock;
+uint64 cfs_min_vruntime;
+
+static uint64
+cfs_min(void)
+{
+  acquire(&cfs_lock);
+  uint64 v = cfs_min_vruntime;
+  release(&cfs_lock);
+  return v;
+}
+
+static void
+cfs_advance_min(uint64 v)
+{
+  acquire(&cfs_lock);
+  if(v > cfs_min_vruntime)
+    cfs_min_vruntime = v;
+  release(&cfs_lock);
 }
 
 // helps ensure that wakeups of wait()ing
@@ -69,6 +110,7 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&cfs_lock, "cfs");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->state = UNUSED;
@@ -143,8 +185,10 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->priority = 10;
-  p->vruntime = min_vruntime_skip(p);
+  p->vruntime = cfs_min();
   p->creation_tick = ticks;
+  p->is_agent = 0;
+  p->jail_root = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -193,6 +237,8 @@ freeproc(struct proc *p)
   p->priority = 0;
   p->vruntime = 0;
   p->creation_tick = 0;
+  p->is_agent = 0;
+  p->jail_root = 0;   // the inode ref itself is released in kexit()
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -247,8 +293,14 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   p->cwd = namei("/");
+
+  // F2: init is xv6's supervisor process (pid 1, reaps orphans, restarts
+  // the shell) — the closest thing to a kernel-level process here, so it
+  // is given a negative (kernel-class) priority. Its forked children run
+  // user code and are reset to the user range (see kfork()).
+  p->priority = -5;
 
   p->state = RUNNABLE;
 
@@ -313,7 +365,16 @@ kfork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
-  np->priority = p->priority;
+
+  // F4: a fork child inherits the parent's CFS state. A child forked by a
+  // kernel-class process runs user code, so it drops to the user range.
+  np->priority = (p->priority < 0) ? 10 : p->priority;
+  np->vruntime = p->vruntime;
+
+  // F7: a sandboxed agent's children stay confined to the same jail.
+  np->is_agent = p->is_agent;
+  if(p->jail_root)
+    np->jail_root = idup(p->jail_root);
 
   pid = np->pid;
 
@@ -367,8 +428,11 @@ kexit(int status)
 
   begin_op();
   iput(p->cwd);
+  if(p->jail_root)             // F7: release the jail root inode
+    iput(p->jail_root);
   end_op();
   p->cwd = 0;
+  p->jail_root = 0;
 
   acquire(&wait_lock);
 
@@ -491,6 +555,9 @@ scheduler(void)
       asm volatile("wfi");
       continue;
     }
+
+    // Advance the global min_vruntime toward the leftmost task (monotonic).
+    cfs_advance_min(best_vr);
 
     best->state = RUNNING;
     c->proc = best;
@@ -618,14 +685,18 @@ void
 wakeup(void *chan)
 {
   struct proc *p;
-  uint64 mvr = min_vruntime_skip(0);
+  uint64 mvr = cfs_min();
 
   for(p = proc; p < &proc[NPROC]; p++) {
     if(p != myproc()){
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
-        if(p->vruntime < mvr) p->vruntime = mvr;
+        // F4: place the woken task at max(its vruntime, min_vruntime) so it
+        // can neither monopolize the CPU (stale low vruntime) nor starve
+        // (stale high vruntime), then grant a small bonus for I/O latency.
+        uint64 base = (p->vruntime > mvr) ? p->vruntime : mvr;
+        p->vruntime = (base > CFS_WAKEUP_BONUS) ? base - CFS_WAKEUP_BONUS : 0;
       }
       release(&p->lock);
     }
@@ -730,7 +801,8 @@ procdump(void)
       state = states[p->state];
     else
       state = "???";
-    printf("%d %s %s", p->pid, state, p->name);
+    printf("%d %s %s prio=%d%s%s", p->pid, state, p->name, p->priority,
+           p->priority < 0 ? " [K]" : "", p->is_agent ? " [A]" : "");
     printf("\n");
   }
 }

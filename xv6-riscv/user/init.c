@@ -23,6 +23,17 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+  // Start the jailed LLM agent runtime. It confines itself via jail() and
+  // then serves LLM-issued commands inside its sandbox for the system's
+  // lifetime (it does not exit, so init's wait() loop never reaps it).
+  pid = fork();
+  if(pid == 0){
+    char *aargv[] = { "agentd", 0 };
+    exec("agentd", aargv);
+    printf("init: exec agentd failed\n");
+    exit(1);
+  }
+
   for(;;){
     printf("init: starting sh\n");
     pid = fork();

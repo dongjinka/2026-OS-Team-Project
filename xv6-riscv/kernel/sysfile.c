@@ -431,6 +431,39 @@ sys_chdir(void)
   return 0;
 }
 
+// F7: jail(path) — confine the calling process to `path` as a sandboxed
+// agent. Afterward the process's filesystem root is `path`: it cannot see
+// or reach anything above it (namex() enforces the chroot), and dangerous
+// syscalls (exec/kill/mknod) are refused (see syscall.c). Permanent — there
+// is deliberately no "unjail". `path` is resolved with the pre-jail root.
+uint64
+sys_jail(void)
+{
+  char path[MAXPATH];
+  struct inode *ip;
+  struct proc *p = myproc();
+
+  begin_op();
+  if(argstr(0, path, MAXPATH) < 0 || (ip = namei(path)) == 0){
+    end_op();
+    return -1;
+  }
+  ilock(ip);
+  if(ip->type != T_DIR){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  iunlock(ip);
+  iput(p->cwd);          // drop the old cwd; the jail dir replaces it
+  end_op();
+
+  p->jail_root = idup(ip);  // separate ref, released in kexit()
+  p->cwd = ip;              // cwd takes namei()'s ref
+  p->is_agent = 1;
+  return 0;
+}
+
 uint64
 sys_exec(void)
 {
