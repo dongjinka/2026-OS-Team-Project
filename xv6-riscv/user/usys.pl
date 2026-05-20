@@ -44,3 +44,6 @@ entry("pause");
 entry("uptime");
 entry("setpriority");
 entry("getpriority");
+entry("set_cache");
+entry("get_cache");
+entry("dispatch");

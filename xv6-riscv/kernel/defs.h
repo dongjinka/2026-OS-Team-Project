@@ -99,7 +99,20 @@ int             kwait(uint64);
 void            wakeup(void*);
 
 // agentcmd.c
-void            agent_dispatch(char *);
+void            agentinit(void);
+void            agent_dispatch(char *);       // interrupt-safe: enqueues only
+void            agent_dispatch_now(char *);   // process-context: actual dispatch
+void            agent_drain(void);            // dequeue + dispatch queued lines
+
+// cache.c
+void            cacheinit(void);
+int             cache_get(const char *key, int klen, char *valbuf, int vbuflen);
+int             cache_get_exact(const char *key, int klen, char *valbuf, int vbuflen);
+int             cache_get_semantic(const char *key, int klen, char *valbuf, int vbuflen, int *out_score);
+int             cache_set(const char *key, int klen, const char *val, int vlen);
+
+// sysfile.c
+struct inode*   create(char *path, short type, short major, short minor);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);

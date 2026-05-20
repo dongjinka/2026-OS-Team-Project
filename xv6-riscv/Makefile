@@ -29,7 +29,8 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o \
-  $K/agentcmd.o
+  $K/agentcmd.o \
+  $K/cache.o
 
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
@@ -147,6 +148,10 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_priority_test\
+	$U/_cache_test\
+	$U/_eval\
+	$U/_agent_multi\
+	$U/_write_race\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

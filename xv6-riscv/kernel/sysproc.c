@@ -151,3 +151,71 @@ sys_getpriority(void)
   }
   return -1;
 }
+
+#define MAX_KEY_LEN 1024
+#define MAX_VAL_LEN 256
+
+uint64
+sys_set_cache(void)
+{
+  uint64 key_addr, val_addr;
+  int klen, vlen;
+  argaddr(0, &key_addr);
+  argint(1, &klen);
+  argaddr(2, &val_addr);
+  argint(3, &vlen);
+  if(klen <= 0 || klen > MAX_KEY_LEN) return -1;
+  if(vlen < 0 || vlen > MAX_VAL_LEN) return -1;
+
+  char key_buf[MAX_KEY_LEN];
+  char val_buf[MAX_VAL_LEN];
+  struct proc *p = myproc();
+
+  if(copyin(p->pagetable, key_buf, key_addr, klen) < 0) return -1;
+  if(vlen > 0 && copyin(p->pagetable, val_buf, val_addr, vlen) < 0) return -1;
+
+  return cache_set(key_buf, klen, val_buf, vlen);
+}
+
+uint64
+sys_get_cache(void)
+{
+  uint64 key_addr, vbuf_addr;
+  int klen, vbuflen;
+  argaddr(0, &key_addr);
+  argint(1, &klen);
+  argaddr(2, &vbuf_addr);
+  argint(3, &vbuflen);
+  if(klen <= 0 || klen > MAX_KEY_LEN) return -1;
+  if(vbuflen <= 0) return -1;
+
+  char key_buf[MAX_KEY_LEN];
+  char val_buf[MAX_VAL_LEN];
+  struct proc *p = myproc();
+
+  if(copyin(p->pagetable, key_buf, key_addr, klen) < 0) return -1;
+
+  int vlen = cache_get(key_buf, klen, val_buf, MAX_VAL_LEN);
+  if(vlen < 0) return -1;
+
+  int n = (vlen < vbuflen) ? vlen : vbuflen;
+  if(n > 0 && copyout(p->pagetable, vbuf_addr, val_buf, n) < 0) return -1;
+  return vlen;
+}
+
+// Allow userspace to feed the agent dispatcher directly — same wire format
+// the QEMU serial port accepts ("REQ|...\n" or "REQ|agent:<role>|...\n").
+// Used by eval / agent_multi for in-kernel ACL & cache demos.
+#define MAX_DISPATCH_LEN 1024
+
+uint64
+sys_dispatch(void)
+{
+  uint64 addr;
+  argaddr(0, &addr);
+  char buf[MAX_DISPATCH_LEN];
+  struct proc *p = myproc();
+  if(copyinstr(p->pagetable, buf, addr, MAX_DISPATCH_LEN) < 0) return -1;
+  agent_dispatch_now(buf);
+  return 0;
+}
