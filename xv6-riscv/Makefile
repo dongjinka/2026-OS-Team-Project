@@ -147,6 +147,7 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_priority_test\
+	$U/_cfs_share\
 	$U/_agentdemo\
 	$U/_agentd\
 
