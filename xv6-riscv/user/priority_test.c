@@ -111,51 +111,80 @@ test_inheritance(void)
 /*
  * Test 3: High-priority process completes before lower-priority ones
  *
- * We fork 3 children with different priorities. Each child burns CPU
- * then prints a message and exits. With priority scheduling, the
- * high-priority child should finish first.
+ * Fork 3 children with priorities HIGH(1), MED(10), LOW(19). Each child
+ * burns identical CPU work then writes its label to a shared pipe just
+ * before exit. The parent reads the pipe to recover the *actual* finish
+ * order and asserts HIGH → MED → LOW.
+ *
+ * Why a pipe (not wait()): wait() returns "any exited child" and its
+ * ordering is implementation-defined when multiple children have already
+ * exited. A pipe gives a hard happens-before edge: the byte arrives in
+ * the order the children's write() syscalls were serialized.
  */
 static void
 test_scheduling_order(void)
 {
   printf("--- Test 3: High-priority process runs first ---\n");
 
-  /* We'll create children in order: LOW, MED, HIGH
-   * but expect them to finish: HIGH, MED, LOW */
-
-  int pids[3];
-
-  /* Child 0: LOW priority (19) */
-  pids[0] = fork();
-  if (pids[0] == 0) {
-    setpriority(getpid(), 19);
-    burn(5000000);
-    printf("[LOW  prio=19] finished\n");
-    exit(0);
+  int p[2];
+  if (pipe(p) < 0) {
+    printf("FAIL: pipe() failed\n");
+    exit(1);
   }
 
-  /* Child 1: MED priority (10) */
-  pids[1] = fork();
-  if (pids[1] == 0) {
-    setpriority(getpid(), 10);
-    burn(5000000);
-    printf("[MED  prio=10] finished\n");
-    exit(0);
+  /* Make burn work big enough that scheduling effects dominate startup
+   * noise. Tuned by trial on smp=1; raise if Test 3 ever flakes. */
+  const int WORK = 30000000;
+
+  struct { const char *label; int prio; char tag; } kids[] = {
+    { "LOW ",  19, 'L' },
+    { "MED ",  10, 'M' },
+    { "HIGH",   1, 'H' },
+  };
+
+  /* Spawn LOW first so HIGH genuinely has to "overtake". */
+  for (int i = 0; i < 3; i++) {
+    int pid = fork();
+    if (pid < 0) {
+      printf("FAIL: fork failed\n");
+      exit(1);
+    }
+    if (pid == 0) {
+      close(p[0]);
+      setpriority(getpid(), kids[i].prio);
+      burn(WORK);
+      write(p[1], &kids[i].tag, 1);
+      printf("[%s prio=%d] finished\n", kids[i].label, kids[i].prio);
+      exit(0);
+    }
   }
 
-  /* Child 2: HIGH priority (1) */
-  pids[2] = fork();
-  if (pids[2] == 0) {
-    setpriority(getpid(), 1);
-    burn(5000000);
-    printf("[HIGH prio=1] finished\n");
-    exit(0);
-  }
-
-  /* Parent waits for all children */
+  close(p[1]);
   for (int i = 0; i < 3; i++) {
     int status;
     wait(&status);
+  }
+
+  char order[3] = {0};
+  int got = 0;
+  while (got < 3) {
+    int n = read(p[0], order + got, 3 - got);
+    if (n <= 0) break;
+    got += n;
+  }
+  close(p[0]);
+
+  if (got != 3) {
+    printf("FAIL: pipe returned %d bytes (expected 3)\n", got);
+    exit(1);
+  }
+
+  printf("Finish order: %c %c %c (expected: H M L)\n",
+         order[0], order[1], order[2]);
+
+  if (order[0] != 'H' || order[1] != 'M' || order[2] != 'L') {
+    printf("FAIL: CFS did not respect priority\n");
+    exit(1);
   }
 
   printf("Test 3 PASSED\n\n");

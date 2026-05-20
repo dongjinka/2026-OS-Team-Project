@@ -18,6 +18,28 @@
 
 ---
 
+## [2026-05-20] — 평가 자동화 & 설계 결정 문서화
+
+### Added
+- (june) `user/cfs_share.c` 신규 — N개 자식을 다른 priority로 띄워 동일
+  wall-clock 동안 카운터를 경쟁시키고 priority별 CPU 점유율(%)을 출력하는
+  벤치 프로그램. F3/F4의 가중치 효과를 수치로 검증. smp=1 권장.
+- (june) `user/priority_test.c` Test 3에 **pipe 기반 finish-order 자동 검증**
+  추가. HIGH(1)→MED(10)→LOW(19) 순서가 아니면 FAIL 종료. `burn()` 반복수도
+  30M으로 상향해 스케줄링 효과가 시작 노이즈를 압도하도록 조정.
+
+### Changed
+- (june) F6(JSON 역직렬화) 설계 결정: **호스트(`agent.py`) 측 파싱 유지**.
+  근거 4개(커널 안전성·부동소수/동적할당 제약·계층 분리·검증 단순화)를
+  `plan.md §5.1` + `Implementation.md §7.2`에 명시. 제안서 §F6 원문(커널 내
+  파싱)에서 변경된 사유를 보고서에 명기.
+- (june) `Makefile` UPROGS에 `_cfs_share` 등록.
+- (june) `plan.md` 진행 현황 표: F6 ✅ 완료, §5.3 평가 강화 ✅ 완료로 갱신.
+- (june) `Implementation.md` §6 검증 표·§7.1 평가 한계·§8 파일 변경 요약에
+  Test 3 자동 검증·`cfs_share` 항목 반영.
+
+---
+
 ## [2026-05-20] — 문서 정합성 정리 & 빌드 누락 복원
 
 ### Added

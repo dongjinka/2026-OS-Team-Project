@@ -358,7 +358,9 @@ python3 agent.py
 | 케이스                             | 결과                          |
 |-----------------------------------|-------------------------------|
 | 커널 부팅 (smp=1, smp=3)          | ✅ panic 없음                 |
-| `priority_test` Test 1·2·3        | ✅ 모두 PASSED                |
+| `priority_test` Test 1·2          | ✅ 모두 PASSED                |
+| `priority_test` Test 3 (자동 검증) | ✅ pipe로 finish order 강제 검증 (HIGH→MED→LOW) |
+| `cfs_share` (점유율 정량)         | smp=1에서 priority별 share 출력 (수동 확인) |
 | `agentdemo` (F2·F7 종합)          | ✅ 5개 체크 통과              |
 | jail 내부 파일 read/write         | ✅                            |
 | jail에서 `..`·외부 경로 접근       | ✅ DENY                       |
@@ -374,14 +376,31 @@ python3 agent.py
 
 ### 7.1 평가 한계
 
-- `priority_test` Test 3은 finish-order를 프로그램적으로 검증하지 않음.
-  자동 검증 추가 필요 (plan.md §5.3).
+- ~~`priority_test` Test 3은 finish-order를 프로그램적으로 검증하지 않음.~~
+  → 2026-05-20 pipe 기반 자동 검증 추가.
+- `cfs_share`의 점유율 결과는 콘솔 출력만 제공 — 자동 합격 판정은 없음
+  (수치 기준이 환경 의존적이라 의도). 보고서용 측정에 사용.
 - smp ≥ RUNNABLE 수일 때 시분할 효과가 줄어들어 측정은 smp=1 권장.
 
-### 7.2 미구현 (선택)
+### 7.2 F6 — JSON 파싱 위치 (설계 결정)
 
-- **F6 JSON 파싱 위치**: 현재 호스트(`agent.py`)에서 수행. 제안서 원문은
-  xv6 내부 파싱이라 두 안 중 보고서 명시 필요 (plan.md §5.1).
+JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된 최소
+포맷(`REQ|<CMD>|<arg>`)만 수신. 근거는 다음 네 가지:
+
+1. **커널 안전성** — 동적 입력 파서의 메모리 안전성 결함은 곧 커널 패닉.
+   Python `json.loads`는 표준 라이브러리로 검증돼 있어 리스크 ≈ 0.
+2. **부동소수·동적할당 제약** — xv6 커널은 둘 다 금지. JSON의 number·중첩
+   객체와 자연스럽게 충돌.
+3. **분리된 책임** — LLM 응답 해석(에이전트 사고)과 커널 명령 실행을 계층
+   분리. 향후 LLM 측 포맷 변경이 커널에 영향 없음.
+4. **사후 검증 단순화** — `REQ|` prefix + 명령 화이트리스트 + arg 길이 검사
+   한 줄로 끝남. 거부 목록 + jail + 위험 syscall 차단 3중 방어와 정합적.
+
+제안서 §F6 원문은 "xv6 내부 JSON 역직렬화"를 명시하므로, 본 결정과 사유를
+기술 보고서에 함께 기재한다.
+
+### 7.3 미구현 (선택)
+
 - **F9 LLM 응답 캐시**: 미구현. `kernel/cache.c` + LRU + `CACHE_GET/SET` 명령
   으로 확장 가능 (plan.md §5.2).
 - **F10 LoRA 학습**: xv6 환경 제약상 범위 외.
@@ -406,6 +425,7 @@ python3 agent.py
 | [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()` 스텁 |
 | [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임 |
 | [user/agentdemo.c](xv6-riscv/user/agentdemo.c)                             | **신규** — F2·F7 데모 |
+| [user/cfs_share.c](xv6-riscv/user/cfs_share.c)                             | **신규** — CFS 점유율 정량 벤치 |
 | [mkfs/mkfs.c](xv6-riscv/mkfs/mkfs.c)                                       | **복원** — `.gitignore` 패턴 문제로 누락돼 있던 것 |
 | [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화 |
 | [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd` UPROGS 등록 |
