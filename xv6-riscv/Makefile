@@ -147,6 +147,8 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_priority_test\
+	$U/_agentdemo\
+	$U/_agentd\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

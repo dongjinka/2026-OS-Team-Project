@@ -675,11 +675,17 @@ static struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
+  struct proc *pr = myproc();
+  // F7: a sandboxed agent is chroot'd — its filesystem root is the jail.
+  int jailed = (pr && pr->is_agent && pr->jail_root);
 
-  if(*path == '/')
-    ip = iget(ROOTDEV, ROOTINO);
-  else
-    ip = idup(myproc()->cwd);
+  if(*path == '/'){
+    if(jailed)
+      ip = idup(pr->jail_root);   // "/" resolves to the jail root
+    else
+      ip = iget(ROOTDEV, ROOTINO);
+  } else
+    ip = idup(pr->cwd);
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
@@ -691,6 +697,13 @@ namex(char *path, int nameiparent, char *name)
       // Stop one level early.
       iunlock(ip);
       return ip;
+    }
+    // F7: block ".." from climbing above the jail root — the agent
+    // cannot reach anything outside its confined subtree.
+    if(jailed && name[0]=='.' && name[1]=='.' && name[2]=='\0' &&
+       ip->dev == pr->jail_root->dev && ip->inum == pr->jail_root->inum){
+      iunlock(ip);
+      continue;   // stay pinned at the jail root
     }
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);

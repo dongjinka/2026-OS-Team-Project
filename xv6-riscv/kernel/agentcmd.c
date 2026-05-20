@@ -1,10 +1,21 @@
-// Kernel-side dispatcher for agent commands sent over the QEMU serial port
-// (TCP 4444 in the qemu-agent target). The line protocol is:
+// Kernel side of the agent command path.
+//
+// LLM commands arrive over the QEMU serial port as lines of the form
 //
 //   REQ|<CMD>|<arg>\n
 //
-// Lines are sniffed and accumulated in console.c; complete lines are passed
-// here. This file does the parsing and the call into kernel functions.
+// console.c sniffs these lines and hands each one to agent_dispatch().
+// IMPORTANT: agent_dispatch() runs in *interrupt context* and must not
+// sleep, fork, or touch the file system. So the kernel does NOT execute
+// the command here. Instead it:
+//
+//   1. drops outright-denied commands (F7 hard sandbox boundary), and
+//   2. enqueues every other line into a small ring buffer.
+//
+// The jailed agent runtime process `agentd` (user/agentd.c) pulls lines
+// from that ring buffer via the agent_recv() system call and executes
+// them *inside its chroot jail* with dangerous syscalls blocked. Human
+// shell input never travels this path — only LLM-issued commands do.
 
 #include "types.h"
 #include "param.h"
@@ -14,82 +25,106 @@
 #include "proc.h"
 #include "defs.h"
 
-extern struct proc proc[NPROC];
+#define AGENTQ_N    16     // ring buffer capacity (commands)
+#define AGENTQ_LEN  256    // max length of one command line
 
-static int
-str_eq(const char *a, const char *b)
+struct {
+  struct spinlock lock;
+  char buf[AGENTQ_N][AGENTQ_LEN];
+  int r;          // next slot to read
+  int w;          // next slot to write
+  int count;      // queued commands
+} agentq;
+
+void
+agentcmd_init(void)
 {
-  while(*a && *b){ if(*a != *b) return 0; a++; b++; }
-  return *a == *b;
+  initlock(&agentq.lock, "agentq");
+  agentq.r = agentq.w = agentq.count = 0;
 }
 
+// Commands the kernel refuses outright: they never reach the agent
+// runtime at all (F7 — the hard sandbox boundary).
 static int
-parse_uint(const char *s, int *out)
+deny_listed(const char *cmd)
 {
-  int v = 0, any = 0;
-  while(*s >= '0' && *s <= '9'){ v = v*10 + (*s - '0'); any = 1; s++; }
-  if(!any) return -1;
-  *out = v;
-  return (*s == 0) ? 0 : -1;
+  static const char *denied[] = { "KILL", "EXEC" };
+  for(int i = 0; i < 2; i++){
+    const char *d = denied[i], *c = cmd;
+    while(*c && *d && *c == *d){ c++; d++; }
+    if(*c == 0 && *d == 0)
+      return 1;
+  }
+  return 0;
 }
 
+// Called from consoleintr() for each complete "REQ|" line. Interrupt
+// context: spinlock + wakeup only, never sleeps.
 void
 agent_dispatch(char *line)
 {
-  // line is null-terminated, no trailing newline. Verify REQ| prefix.
-  if(!(line[0]=='R' && line[1]=='E' && line[2]=='Q' && line[3]=='|')) return;
-  char *cmd = line + 4;
+  if(!(line[0]=='R' && line[1]=='E' && line[2]=='Q' && line[3]=='|'))
+    return;
 
-  // split at the first '|' after cmd
-  char *bar = cmd;
-  while(*bar && *bar != '|') bar++;
-  if(*bar != '|'){ printf("[agent] malformed: %s\n", line); return; }
-  *bar = 0;
-  char *arg = bar + 1;
-
-  if(str_eq(cmd, "PRINT")){
-    printf("[agent] %s\n", arg);
+  // extract the command name (between "REQ|" and the next '|')
+  char cmd[24];
+  int n = 0;
+  char *p = line + 4;
+  while(*p && *p != '|' && n < (int)sizeof(cmd) - 1)
+    cmd[n++] = *p++;
+  cmd[n] = 0;
+  if(*p != '|'){
+    printf("[agent] malformed: %s\n", line);
     return;
   }
 
-  if(str_eq(cmd, "KILL")){
-    int pid;
-    if(parse_uint(arg, &pid) < 0){ printf("[agent] bad KILL pid: %s\n", arg); return; }
-    if(pid <= 2){
-      printf("[agent] DENY kill pid=%d (init/sh protected)\n", pid);
-      return;
-    }
-    if(kkill(pid) == 0) printf("[agent] killed pid=%d\n", pid);
-    else                printf("[agent] no such pid=%d\n", pid);
+  if(deny_listed(cmd)){
+    printf("[agent] DENY '%s' (sandboxed: never reaches the agent)\n", cmd);
     return;
   }
 
-  if(str_eq(cmd, "NICE")){
-    // arg = "<pid>:<prio>"
-    char *colon = arg;
-    while(*colon && *colon != ':') colon++;
-    if(*colon != ':'){ printf("[agent] bad NICE arg: %s\n", arg); return; }
-    *colon = 0;
-    int pid, prio;
-    if(parse_uint(arg, &pid) < 0 || parse_uint(colon+1, &prio) < 0){
-      printf("[agent] bad NICE numbers\n"); return;
-    }
-    if(prio < 0 || prio > 20){ printf("[agent] bad prio %d\n", prio); return; }
-
-    struct proc *p;
-    for(p = proc; p < &proc[NPROC]; p++){
-      acquire(&p->lock);
-      if(p->pid == pid){
-        p->priority = prio;
-        release(&p->lock);
-        printf("[agent] pid=%d prio=%d\n", pid, prio);
-        return;
-      }
-      release(&p->lock);
-    }
-    printf("[agent] no such pid=%d\n", pid);
+  // enqueue the raw line for the jailed agentd to execute
+  acquire(&agentq.lock);
+  if(agentq.count == AGENTQ_N){
+    release(&agentq.lock);
+    printf("[agent] queue full, dropping '%s'\n", cmd);
     return;
   }
+  int i = 0;
+  while(line[i] && i < AGENTQ_LEN - 1){
+    agentq.buf[agentq.w][i] = line[i];
+    i++;
+  }
+  agentq.buf[agentq.w][i] = 0;
+  agentq.w = (agentq.w + 1) % AGENTQ_N;
+  agentq.count++;
+  release(&agentq.lock);
+  wakeup(&agentq);
+}
 
-  printf("[agent] unknown cmd '%s'\n", cmd);
+// Blocking dequeue, called from sys_agent_recv() in process context.
+// Copies the next command line into out (>= AGENTQ_LEN bytes). Returns
+// the string length, or -1 if the caller was killed while waiting.
+int
+agentq_get(char *out)
+{
+  acquire(&agentq.lock);
+  while(agentq.count == 0){
+    if(killed(myproc())){
+      release(&agentq.lock);
+      return -1;
+    }
+    sleep(&agentq, &agentq.lock);
+  }
+  int i = 0;
+  char *src = agentq.buf[agentq.r];
+  while(src[i] && i < AGENTQ_LEN - 1){
+    out[i] = src[i];
+    i++;
+  }
+  out[i] = 0;
+  agentq.r = (agentq.r + 1) % AGENTQ_N;
+  agentq.count--;
+  release(&agentq.lock);
+  return i;
 }

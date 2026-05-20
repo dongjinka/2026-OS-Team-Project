@@ -81,12 +81,13 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  // CFS: charge vruntime weighted by nice (priority+1: 1..21 ticks per tick).
+  // CFS: charge vruntime for this tick, scaled inversely by the process's
+  // load weight (cfs_vdelta) so lower-nice tasks accumulate it slower.
   if(which_dev == 2){
     struct proc *cp = myproc();
     if(cp){
       acquire(&cp->lock);
-      cp->vruntime += (uint64)(cp->priority + 1);
+      cp->vruntime += cfs_vdelta(cp->priority);
       release(&cp->lock);
     }
     yield();
@@ -160,11 +161,11 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  // CFS: charge vruntime weighted by nice (priority+1).
+  // CFS: charge weighted vruntime for this tick (see cfs_vdelta).
   if(which_dev == 2 && myproc() != 0){
     struct proc *cp = myproc();
     acquire(&cp->lock);
-    cp->vruntime += (uint64)(cp->priority + 1);
+    cp->vruntime += cfs_vdelta(cp->priority);
     release(&cp->lock);
     yield();
   }

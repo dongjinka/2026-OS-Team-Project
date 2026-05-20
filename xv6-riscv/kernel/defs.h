@@ -97,9 +97,12 @@ void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             kwait(uint64);
 void            wakeup(void*);
+uint64          cfs_vdelta(int);
 
 // agentcmd.c
 void            agent_dispatch(char *);
+void            agentcmd_init(void);
+int             agentq_get(char *);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);

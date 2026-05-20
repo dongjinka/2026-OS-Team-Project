@@ -44,3 +44,5 @@ entry("pause");
 entry("uptime");
 entry("setpriority");
 entry("getpriority");
+entry("jail");
+entry("agent_recv");

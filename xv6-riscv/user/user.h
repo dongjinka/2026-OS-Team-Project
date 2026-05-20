@@ -26,6 +26,8 @@ int pause(int);
 int uptime(void);
 int setpriority(int, int);
 int getpriority(int);
+int jail(const char*);
+int agent_recv(char*);
 
 // ulib.c
 int stat(const char*, struct stat*);

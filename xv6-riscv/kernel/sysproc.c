@@ -117,7 +117,12 @@ sys_setpriority(void)
   argint(0, &pid);
   argint(1, &priority);
 
-  if(priority < 0 || priority > 20)
+  // F2: valid nice range is -20..20; negative values are kernel-class.
+  if(priority < -20 || priority > 20)
+    return -1;
+  // F2/F7: a user-class process (priority >= 0) may not grant kernel-class
+  // (negative) priority to anyone — that would be a privilege escalation.
+  if(priority < 0 && myproc()->priority >= 0)
     return -1;
 
   struct proc *p;
@@ -150,4 +155,26 @@ sys_getpriority(void)
     release(&p->lock);
   }
   return -1;
+}
+
+// agent_recv(buf): block until an LLM command line is available, then copy
+// it into buf (caller must provide >= 256 bytes). Only the jailed agent
+// runtime may pull commands. Returns the line length, -1 on error.
+uint64
+sys_agent_recv(void)
+{
+  uint64 uaddr;
+  argaddr(0, &uaddr);
+
+  struct proc *p = myproc();
+  if(!p->is_agent)          // only a sandboxed agent process may receive
+    return -1;
+
+  char kbuf[256];           // == AGENTQ_LEN in agentcmd.c
+  int n = agentq_get(kbuf);
+  if(n < 0)
+    return -1;
+  if(copyout(p->pagetable, uaddr, kbuf, n + 1) < 0)
+    return -1;
+  return n;
 }
