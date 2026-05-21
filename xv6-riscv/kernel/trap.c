@@ -93,6 +93,9 @@ usertrap(void)
     yield();
   }
 
+  // Drain agent dispatcher queue in process context (safe for fs ops).
+  agent_drain();
+
   prepare_return();
 
   // the user page table to switch to, for trampoline.S

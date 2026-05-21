@@ -1,232 +1,154 @@
-"""Python <-> xv6 LLM agent bridge.
+"""Python <-> xv6 LLM bridge — Solar 프록시 + 액션 번역.
 
-Connects to the QEMU serial port exposed by `make qemu-agent` (TCP 4444)
-and runs an autonomous *agent loop* on top of Upstage Solar:
+이 프로그램은 "OS for LLM" 설계 원칙에 따라 **의사결정을 전혀 하지 않는다**.
+오케스트레이션(캐시 조회, LLM 호출 판단, 캐시 저장, 명령 dispatch)은 모두 xv6
+커널과 jail 안 `agentd` 가 담당한다. 이 프로그램의 역할은 두 가지뿐이다:
 
-    user request
-      → the model reasons and either calls a tool or gives a final answer
-      → a tool runs inside the xv6 sandbox (jailed agentd)
-      → the tool's OUTPUT is fed back to the model as an observation
-      → repeat until the model produces an answer
+  1. 사용자 입력 + 현재 역할(role)을 `REQ|agent:<role>|ASK|<프롬프트>` 로 중계
+  2. 커널이 `LLM_REQ|<프롬프트>` 를 보내올 때만 Solar API를 호출하고,
+     번역한 와이어 명령을 `REQ|LLM_RESP|<CMD>|<arg>` 로 돌려줌
+     (xv6 커널은 인터넷이 없으므로 이 한 가지만 호스트가 대신한다)
 
-The model keeps full conversation memory, so follow-up questions ("now
-summarize them") build on earlier steps.
+역할(role) 은 클라이언트가 자유로이 토글하며 wire 의 진단 라벨로 남지만,
+**sandboxing 의 실제 경계는 jail** 이다 — `init → fork → exec(agentd) →
+jail("/agentbox")` 로 jailed agent 프로세스가 chroot 안에 갇히고, 위험한
+syscall (`exec`/`kill`/`mknod`) 은 커널 `agent_blocked()` 가 거부한다.
 
 Modes:
-  * Mock  (no UPSTAGE_API_KEY): a trivial rule-based stand-in — one tool
-    call per request, no real planning. Lets you exercise the kernel path.
-  * Solar (UPSTAGE_API_KEY set — read from a .env file next to this script
-    or from the environment; needs `pip install openai`): the full loop.
+  * Mock (UPSTAGE_API_KEY 미설정): 네트워크 호출 없이 규칙 기반 응답
+  * Real: UPSTAGE_API_KEY 설정 시 Solar Pro 실제 호출 (openai SDK 필요)
 
 Usage:
-    cd xv6-riscv && make qemu-agent   # one terminal — xv6 listens on 4444
-    python3 agent.py                  # another terminal
+    cd /root/OS_Project/xv6-riscv && make qemu-agent   # 한 터미널
+    python3 /root/OS_Project/agent.py                  # 다른 터미널
 """
 
 import json
 import os
+import readline   # input() 의 line buffer 를 비동기 출력 후 redraw 하기 위해
 import socket
 import sys
 import threading
 import time
 
 SOLAR_BASE_URL = "https://api.upstage.ai/v1"
-DEFAULT_MODEL = "solar-pro2"      # override via UPSTAGE_MODEL
-MAX_STEPS = 8                     # tool calls allowed per user request
-MAX_HISTORY = 24                  # chat messages kept besides the system prompt
+DEFAULT_MODEL = "solar-pro2"
 
-
-def load_dotenv():
-    """Load KEY=VALUE pairs from a .env file next to this script, if present.
-    Real environment variables take precedence over .env values."""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    try:
-        with open(path) as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                os.environ.setdefault(key.strip(),
-                                      val.strip().strip('"').strip("'"))
-    except FileNotFoundError:
-        pass
-
-
-# ── thread-safe coloured console output ────────────────────────────────
-# The reader thread and the REPL thread both write to stdout. A shared
-# lock serialises writes; `_cursor` tracks where the terminal cursor is
-# ("start" / "xv6" mid-xv6-line / "other" mid-prompt) so every kind of
-# line is started and prefixed exactly once.
-_LOCK = threading.Lock()
-_cursor = "start"
-
-_RST, _GREEN, _CYAN = "\033[0m", "\033[92m", "\033[96m"
-_YELLOW, _RED, _BOLD, _DIM = "\033[93m", "\033[91m", "\033[1m", "\033[2m"
-
-
-def _raw(s: str) -> None:
-    try:
-        sys.stdout.write(s)
-        sys.stdout.flush()
-    except (ValueError, OSError):
-        pass  # stdout closed during shutdown
-
-
-def _line(text: str, color: str) -> None:
-    """Write one complete bridge-side line; always starts on a fresh line."""
-    global _cursor
-    with _LOCK:
-        if _cursor != "start":
-            _raw(_RST + "\n")
-        _raw(f"{color}{text}{_RST}\n")
-        _cursor = "start"
-
-
-def info(msg):  _line(msg, _CYAN)
-def warn(msg):  _line(msg, _RED)
-def think(msg): _line(f"   💭 {msg}", _DIM)
-def step(n, tool, args):
-    detail = "  ".join(f"{k}={v}" for k, v in args.items())
-    _line(f"   ▶ step {n} · {tool}  {detail}".rstrip(), _YELLOW)
-
-
-def answer(text):
-    """Print the model's final answer as a clearly delimited block."""
-    global _cursor
-    with _LOCK:
-        if _cursor != "start":
-            _raw(_RST + "\n")
-        _raw(f"{_BOLD}{_CYAN}╭─ answer ──────────────────────────────────────╮{_RST}\n")
-        for ln in str(text).rstrip().split("\n"):
-            _raw(f"{_BOLD}{_CYAN}│{_RST} {ln}\n")
-        _raw(f"{_BOLD}{_CYAN}╰───────────────────────────────────────────────╯{_RST}\n")
-        _cursor = "start"
-
-
-# ── prompt + parsing ───────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are an autonomous agent running on a tiny operating system (xv6).
-You help the user by reasoning step by step, calling tools, and observing
-their results. You operate inside a sandbox: a single jailed directory.
-
-TOOLS (each runs inside the sandbox):
-  ls                       list the files in the sandbox (name and size)
-  read   {"file":"<name>"} read a file's contents
-  write  {"file":"<name>","text":"<content>"}  create/overwrite a file
-  print  {"msg":"<text>"}  print a message on the xv6 console
-  nice   {"pid":<int>,"priority":<int 0..20>}  change a process's priority
-  list   list the agent runtime's callable functions and their priorities
-(There is no "kill" / "exec" — the sandbox blocks them.)
-
-PROTOCOL — on every step reply with EXACTLY ONE JSON object, nothing else:
-  to call a tool:  {"thought":"<short reasoning>","tool":"<name>","args":{...}}
-  to finish:       {"thought":"<short reasoning>","answer":"<reply to user>"}
-
-After each tool call you receive an "OBSERVATION" with that tool's real
-output. Use observations to decide the next step. Plan multi-step tasks:
-e.g. to summarise every file, first call `ls`, then `read` each file, then
-give the "answer". Keep going until you can answer; do not ask the user to
-run commands themselves. Answer in the user's language.
+SYSTEM_PROMPT = """You translate a user's natural-language request into a single JSON action for an LLM-OS kernel.
+Reply ONLY with one JSON object (no prose, no markdown fences). Schema:
+  {"action":"print", "msg":"<text>"}                       # echo text to kernel log
+  {"action":"chat",  "msg":"<reply>"}                      # natural-language reply
+  {"action":"read",  "path":"<path>"}                      # read a file
+  {"action":"write", "path":"<path>", "content":"<...>"}   # write/overwrite a file
+  {"action":"ls",    "path":"<path>"}                      # list a directory
+  {"action":"ps"}                                          # list processes
+  {"action":"kill",  "pid": <int>}                         # kill a process
+  {"action":"nice",  "pid": <int>, "priority": <int 0..20>}# change priority
+If the user asks an open question, choose "chat". If they want a literal echo, "print".
+Examples:
+  user: hello world             -> {"action":"print","msg":"hello world"}
+  user: kill pid 4              -> {"action":"kill","pid":4}
+  user: lower pid 5 to nice 3   -> {"action":"nice","pid":5,"priority":3}
+  user: write hi to /a.txt      -> {"action":"write","path":"/a.txt","content":"hi"}
+  user: read /a.txt             -> {"action":"read","path":"/a.txt"}
+  user: list root               -> {"action":"ls","path":"/"}
+  user: process list            -> {"action":"ps"}
+  user: how are you             -> {"action":"chat","msg":"I'm a kernel agent, all good."}
 """
 
-# tool name -> wire payload (the kernel adds nothing; agentd executes it)
-def wire_for(tool: str, args: dict):
-    try:
-        if tool == "ls":    return "LS|"
-        if tool == "list":  return "LIST|"
-        if tool == "read":  return f"READ|{args['file']}"
-        if tool == "write": return f"WRITE|{args['file']}:{args.get('text','')}"
-        if tool == "print": return f"PRINT|{args.get('msg','')}"
-        if tool == "nice":  return f"NICE|{int(args['pid'])}:{int(args['priority'])}"
-    except (KeyError, ValueError, TypeError):
-        return None
-    return None
+# JSON action → 와이어 명령("CMD|arg"). REQ| 접두어와 role/LLM_RESP 래핑은 커널이 담당.
+ACTION_TABLE = {
+    "print": lambda a: f"PRINT|{a.get('msg','')}",
+    "chat":  lambda a: f"CHAT|{a.get('msg','')}",
+    "read":  lambda a: f"READ|{a['path']}",
+    "write": lambda a: f"WRITE|{a['path']}|{a.get('content','')}",
+    "ls":    lambda a: f"LS|{a.get('path','/')}",
+    "ps":    lambda a: "PS",
+    "kill":  lambda a: f"KILL|{int(a['pid'])}",
+    "nice":  lambda a: f"NICE|{int(a['pid'])}:{int(a['priority'])}",
+}
 
-
-def extract_json(text: str):
-    """Pull one JSON object out of an LLM reply, tolerating fences/prose."""
-    if not text:
-        return None
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if "\n" in text:
-            text = text.split("\n", 1)[1]
-    i, j = text.find("{"), text.rfind("}")
-    if i < 0 or j <= i:
-        return None
-    try:
-        obj = json.loads(text[i:j + 1])
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        return None
-
-
-def clean_observation(text: str) -> str:
-    """Strip kernel/agentd line prefixes so the model sees tidy output."""
-    out = []
-    for ln in text.split("\n"):
-        ln = ln.rstrip("\r")
-        for p in ("[agentd] ", "[agent] "):
-            if ln.startswith(p):
-                ln = ln[len(p):]
-                break
-        out.append(ln)
-    return "\n".join(out).strip()
+VALID_ROLES = ("reader", "writer", "admin")
 
 
 class Agent:
     def __init__(self, host="127.0.0.1", port=4444):
-        self.host, self.port = host, port
+        self.host = host
+        self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        # output capture (the reader thread fills capture_buf while capturing)
-        self.cap_lock = threading.Lock()
-        self.capturing = False
-        self.capture_buf = ""
-        self._seq = 0
-
-        # conversation memory — persists across REPL turns
-        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
+        self._io_lock = threading.Lock()  # reader/worker 동시 출력 보호
         self.api_key = os.environ.get("UPSTAGE_API_KEY")
         self.mock = self.api_key is None
         self.client = None
         self.model = os.environ.get("UPSTAGE_MODEL", DEFAULT_MODEL)
+        self.role = "reader"   # 안전한 기본 — 사용자가 :role 로 승격
         if not self.mock:
             try:
                 from openai import OpenAI
             except ImportError:
-                warn("[bridge] openai SDK missing; falling back to mock mode. "
-                     "Install with: pip install openai")
+                print("[agent] openai SDK missing; falling back to mock mode. "
+                      "Install with: pip install openai")
                 self.mock = True
             else:
                 self.client = OpenAI(api_key=self.api_key, base_url=SOLAR_BASE_URL)
 
         mode = "mock" if self.mock else f"solar ({self.model})"
-        info("=" * 64)
-        info(f"  xv6 LLM agent   ·   mode: {mode}   ·   max {MAX_STEPS} steps/request")
-        info("=" * 64)
+        print(f"[agent] mode = {mode}")
+        print(f"[agent] role = {self.role}  (use ':role <reader|writer|admin>' to switch)")
 
     # ---------- transport ----------
 
+    def _emit_async(self, text: str) -> None:
+        # 비동기 스레드(reader / LLM worker) 가 출력할 때 input() 의 prompt 와
+        # 한 줄에 섞이지 않도록: 현재 prompt 줄을 \r\x1b[K 로 지우고, 본문을
+        # 출력한 뒤 prompt + 현재 readline 입력버퍼를 다시 그린다.
+        with self._io_lock:
+            sys.stdout.write('\r\x1b[K')
+            sys.stdout.write(text)
+            if not text.endswith('\n'):
+                sys.stdout.write('\n')
+            try:
+                buf = readline.get_line_buffer()
+            except Exception:
+                buf = ''
+            sys.stdout.write(f'agent[{self.role}]> ' + buf)
+            sys.stdout.flush()
+
     def connect(self):
-        info(f"[bridge] connecting to xv6 at {self.host}:{self.port} ...")
+        print(f"[*] connecting to xv6 at {self.host}:{self.port} ...")
         while True:
             try:
                 self.sock.connect((self.host, self.port))
                 break
             except ConnectionRefusedError:
                 time.sleep(1)
-        info("[bridge] connected")
+        print("[+] connected\n")
         threading.Thread(target=self._reader, daemon=True).start()
 
-    def _send(self, wire: str) -> None:
-        try:
-            self.sock.sendall((wire + "\n").encode("utf-8"))
-        except OSError as e:
-            warn(f"[bridge] send failed: {e}")
+    def _reader(self):
+        """라인 단위로 커널 출력을 처리한다. `LLM_REQ|`로 시작하면 Solar 호출
+        워커를 띄우고, 그 외는 stdout에 초록색으로 출력."""
+        buf = bytearray()
+        while True:
+            try:
+                data = self.sock.recv(4096)
+            except OSError:
+                return
+            if not data:
+                return
+            buf.extend(data)
+            while True:
+                idx = buf.find(b'\n')
+                if idx == -1:
+                    break
+                line = bytes(buf[:idx]).decode('utf-8', 'ignore')
+                del buf[:idx+1]
+                if line.startswith('LLM_REQ|'):
+                    prompt = line[len('LLM_REQ|'):]
+                    threading.Thread(target=self._handle_llm_req,
+                                     args=(prompt,), daemon=True).start()
+                else:
+                    self._emit_async(f'\033[92m{line}\033[0m')
 
     def close(self):
         try:
@@ -234,199 +156,108 @@ class Agent:
         except OSError:
             pass
 
-    def _reader(self):
-        # Live-print xv6 output and, while capturing, accumulate it raw.
-        self.sock.settimeout(0.3)
-        pending = ""
-        while True:
-            try:
-                chunk = self.sock.recv(4096)
-            except socket.timeout:
-                if pending:
-                    self._show(pending, terminated=False)
-                    pending = ""
-                continue
-            except OSError:
-                return
-            if not chunk:
-                return
-            text = chunk.decode("utf-8", "ignore").replace("\r", "")
-            with self.cap_lock:
-                if self.capturing:
-                    self.capture_buf += text
-            pending += text
-            while "\n" in pending:
-                ln, pending = pending.split("\n", 1)
-                self._show(ln, terminated=True)
-
-    def _show(self, ln: str, terminated: bool) -> None:
-        """Live-print one line of xv6 output, prefixed and green."""
-        global _cursor
-        if terminated:
-            if ln.startswith("REQ|"):
-                return                       # xv6's echo of a command we sent
-            if "__OBS" in ln:
-                # internal end-of-output marker — but file data with no
-                # trailing newline can be glued in front of it; show that.
-                ln = ln.split("[agentd] __OBS")[0].rstrip()
-                if not ln:
-                    return
-            if ln == "":
-                return                       # blank line
-        with _LOCK:
-            if _cursor != "xv6":
-                if _cursor == "other":
-                    _raw("\n")
-                _raw(f"{_GREEN}   xv6 ┃ ")
-            _raw(ln)
-            if terminated:
-                _raw(f"{_RST}\n")
-                _cursor = "start"
-            else:
-                _cursor = "xv6"
-
-    # ---------- run one tool inside xv6, capture its output ----------
-
-    def run_tool(self, tool: str, args: dict) -> str:
-        wire = wire_for(tool, args)
-        if wire is None:
-            return f"ERROR: unknown tool '{tool}' or bad arguments {args}"
-
-        # A marker command runs right after the real one; agentd processes
-        # the queue in order, so everything printed before "[agentd] <marker>"
-        # is exactly this tool's output.
-        marker = f"__OBS{self._seq}__"
-        self._seq += 1
-        marker_echo = "REQ|PRINT|" + marker        # xv6 echoes this back
-        marker_out = "[agentd] " + marker          # agentd prints this
-
-        with self.cap_lock:
-            self.capture_buf = ""
-            self.capturing = True
-        self._send("REQ|" + wire)
-        self._send(marker_echo)
-
-        deadline = time.time() + 12
-        while time.time() < deadline:
-            with self.cap_lock:
-                if marker_out in self.capture_buf:
-                    break
-            time.sleep(0.05)
-        with self.cap_lock:
-            self.capturing = False
-            buf = self.capture_buf
-
-        # the observation sits between the echo of the marker command and
-        # the marker's own output line
-        s = buf.find(marker_echo)
-        s = buf.find("\n", s) + 1 if s >= 0 else 0
-        e = buf.find(marker_out)
-        if e < 0:
-            return "ERROR: timed out waiting for xv6 to respond"
-        return clean_observation(buf[s:e]) or "(the tool produced no output)"
-
     # ---------- LLM ----------
 
-    def _call_llm(self):
-        if self.mock:
-            return self._mock_step()
+    def _mock_llm(self, prompt: str) -> dict:
+        toks = prompt.strip().split()
+        if not toks:
+            return {"action": "print", "msg": ""}
+        head = toks[0].lower()
+        if head == "kill" and len(toks) >= 2 and toks[1].isdigit():
+            return {"action": "kill", "pid": int(toks[1])}
+        if head == "nice" and len(toks) >= 3 and toks[1].isdigit() and toks[2].isdigit():
+            return {"action": "nice", "pid": int(toks[1]), "priority": int(toks[2])}
+        if head in ("ps", "프로세스"):
+            return {"action": "ps"}
+        if head == "ls":
+            return {"action": "ls", "path": toks[1] if len(toks) >= 2 else "/"}
+        if head == "read" and len(toks) >= 2:
+            return {"action": "read", "path": toks[1]}
+        if head == "write" and len(toks) >= 3:
+            return {"action": "write", "path": toks[1], "content": " ".join(toks[2:])}
+        if head == "chat":
+            return {"action": "chat", "msg": " ".join(toks[1:]) or "(mock chat)"}
+        return {"action": "print", "msg": prompt[:200]}
+
+    def _solar_llm(self, prompt: str) -> dict | None:
         try:
             resp = self.client.chat.completions.create(
-                model=self.model, temperature=0, messages=self.messages)
-            return extract_json(resp.choices[0].message.content)
+                model=self.model,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
+                ],
+            )
+            text = resp.choices[0].message.content.strip()
         except Exception as e:
-            warn(f"[bridge] solar request failed: {e}")
+            self._emit_async(f"[agent] solar request failed: {e}")
             return None
 
-    def _mock_step(self):
-        """A dumb stand-in for the LLM: one tool call, then an answer."""
-        last = self.messages[-1]["content"]
-        if last.startswith("OBSERVATION"):
-            body = last.split("\n", 1)[1] if "\n" in last else ""
-            return {"thought": "(mock) returning observation",
-                    "answer": "(mock mode — no LLM)\n" + body}
-        t = last.lower()
-        if any(w in t for w in ("file", "파일", "list", "목록", "ls", "wrote", "쓴")):
-            return {"thought": "(mock) list files", "tool": "ls", "args": {}}
-        return {"thought": "(mock) print it", "tool": "print",
-                "args": {"msg": last[:120]}}
+        if text.startswith("```"):
+            inner = text.strip("`")
+            if "\n" in inner:
+                inner = inner.split("\n", 1)[1].rsplit("\n", 1)[0]
+            text = inner.strip()
 
-    # ---------- agent loop ----------
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            self._emit_async(f"[agent] malformed JSON from solar: {e}; raw={text!r}")
+            return None
 
-    def handle(self, user_input: str) -> None:
-        self.messages.append({"role": "user", "content": user_input})
-        for n in range(1, MAX_STEPS + 1):
-            self._trim_history()
-            reply = self._call_llm()
-            if reply is None:
-                warn("[bridge] model gave no usable JSON; asking it to retry.")
-                self.messages.append({"role": "user", "content":
-                    "Your previous reply was not valid JSON. Reply with "
-                    "exactly one JSON object as specified."})
-                continue
+    def llm(self, prompt: str) -> dict | None:
+        return self._mock_llm(prompt) if self.mock else self._solar_llm(prompt)
 
-            self.messages.append({"role": "assistant",
-                                   "content": json.dumps(reply, ensure_ascii=False)})
-            if reply.get("thought"):
-                think(reply["thought"])
+    # ---------- LLM_REQ 처리 (커널 요청에만 반응) ----------
 
-            if "answer" in reply:
-                answer(reply["answer"])
-                return
-
-            tool = reply.get("tool")
-            args = reply.get("args")
-            if not isinstance(args, dict):
-                args = {}
-            if not tool:
-                self.messages.append({"role": "user", "content":
-                    "OBSERVATION: your reply had neither 'tool' nor 'answer'."})
-                continue
-
-            step(n, tool, args)
-            obs = self.run_tool(tool, args)
-            self.messages.append({"role": "user",
-                                   "content": f"OBSERVATION ({tool}):\n{obs}"})
-
-        warn(f"[bridge] stopped after {MAX_STEPS} steps without a final answer.")
-
-    def _trim_history(self):
-        if len(self.messages) > 1 + MAX_HISTORY:
-            self.messages = [self.messages[0]] + self.messages[-MAX_HISTORY:]
+    def _handle_llm_req(self, prompt: str) -> None:
+        action = self.llm(prompt)
+        if action is None:
+            wire = "PRINT|(llm error)"
+        else:
+            fn = ACTION_TABLE.get(action.get("action"))
+            try:
+                wire = fn(action) if fn else f"PRINT|(unknown action {action})"
+            except (KeyError, ValueError, TypeError) as e:
+                wire = f"PRINT|(bad action: {e})"
+        self.sock.sendall(f"REQ|LLM_RESP|{wire}\n".encode("utf-8"))
+        self._emit_async(f"[agent] LLM_REQ '{prompt[:40]}' -> {wire}")
 
     # ---------- REPL ----------
 
     def repl(self) -> None:
-        global _cursor
-        info("  Ask in plain language — I plan, run sandbox tools, observe,")
-        info("  and remember the conversation.   Ctrl-D / Ctrl-C to quit.")
-        info("  e.g.  'what files have I created?'")
-        info("        'summarise everything written to files so far'")
-        info("        'make a file plan.txt with three TODO items'")
-        info("-" * 64)
+        print("Type a request, or Ctrl-D / Ctrl-C to quit.")
+        print("Commands: ':role <reader|writer|admin>' to switch role.")
+        print("Examples: 'hello world', 'kill 7', 'write hi to /a.txt', 'list root'.")
+        print("(캐시 조회·디스패치·ACL은 xv6 커널이 담당 — 이 프로그램은 중계만 한다)\n")
         while True:
-            with _LOCK:
-                if _cursor != "start":
-                    _raw(_RST + "\n")
-                _raw(f"\n{_BOLD}you ▸{_RST} ")
-                _cursor = "other"
             try:
-                line = input()
+                line = input(f"agent[{self.role}]> ")
             except (EOFError, KeyboardInterrupt):
-                with _LOCK:
-                    _raw("\n")
-                    _cursor = "start"
+                print()
                 break
             line = line.strip()
-            if line:
-                self.handle(line)
+            if not line:
+                continue
+            if line.startswith(":role"):
+                parts = line.split()
+                if len(parts) == 2 and parts[1] in VALID_ROLES:
+                    self.role = parts[1]
+                    print(f"[agent] role = {self.role}")
+                else:
+                    print(f"[agent] usage: :role <{ '|'.join(VALID_ROLES) }>")
+                continue
+            # 가공 없이 커널에 위임 — role prefix 부착, 커널이 캐시 조회 + ACL 검사
+            self.sock.sendall(
+                f"REQ|agent:{self.role}|ASK|{line}\n".encode("utf-8")
+            )
 
 
 def main():
-    load_dotenv()  # pick up UPSTAGE_API_KEY / UPSTAGE_MODEL from .env
     a = Agent()
     a.connect()
-    time.sleep(2)  # let xv6 finish booting before we send anything
+    time.sleep(2)
     try:
         a.repl()
     finally:

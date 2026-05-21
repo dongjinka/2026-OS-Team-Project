@@ -242,7 +242,7 @@ bad:
   return -1;
 }
 
-static struct inode*
+struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
@@ -444,14 +444,22 @@ sys_jail(void)
   struct proc *p = myproc();
 
   begin_op();
-  if(argstr(0, path, MAXPATH) < 0 || (ip = namei(path)) == 0){
+  if(argstr(0, path, MAXPATH) < 0){
     end_op();
+    printf("[jail] argstr failed\n");
+    return -1;
+  }
+  if((ip = namei(path)) == 0){
+    end_op();
+    printf("[jail] namei(%s) returned 0\n", path);
     return -1;
   }
   ilock(ip);
   if(ip->type != T_DIR){
+    int t = ip->type;
     iunlockput(ip);
     end_op();
+    printf("[jail] %s has type=%d (want T_DIR=%d)\n", path, t, T_DIR);
     return -1;
   }
   iunlock(ip);

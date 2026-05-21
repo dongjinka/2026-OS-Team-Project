@@ -45,8 +45,8 @@ consputc(int c)
 struct {
   struct spinlock lock;
 
-  // input circular buffer
-#define INPUT_BUF_SIZE 128
+  // input circular buffer (large enough for CACHE_SET lines with ~1KB keys+vals)
+#define INPUT_BUF_SIZE 2048
   char buf[INPUT_BUF_SIZE];
   uint r;  // Read index
   uint w;  // Write index
@@ -57,7 +57,7 @@ struct {
 // currently being typed (between cons.w and cons.e). On newline, if the line
 // starts with "REQ|" it is consumed by agent_dispatch and hidden from the
 // shell. Kept in lockstep with cons.e via the same edit/erase paths.
-#define AGENT_BUF_SIZE 256
+#define AGENT_BUF_SIZE 2048
 static char agent_buf[AGENT_BUF_SIZE];
 static int  agent_len = 0;
 
@@ -107,6 +107,12 @@ consoleread(int user_dst, uint64 dst, int n)
         release(&cons.lock);
         return -1;
       }
+      // Drain agent dispatcher queue here — we have valid proc context
+      // and no other locks held (cons.lock is released for the sleep below).
+      release(&cons.lock);
+      agent_drain();
+      acquire(&cons.lock);
+      if(cons.r != cons.w) break;   // re-check after drain
       sleep(&cons.r, &cons.lock);
     }
 
@@ -194,9 +200,13 @@ consoleintr(int c)
           agent_buf[agent_len] = 0;
           cons.e = cons.w;
           release(&cons.lock);
-          agent_dispatch(agent_buf);
+          agent_dispatch(agent_buf);        // enqueue (interrupt-safe)
           acquire(&cons.lock);
           agent_len = 0;
+          // Wake shell so it gives us a brief proc context window for drain.
+          // Shell will find cons.r==cons.w and re-sleep, but during that
+          // wake-resleep window consoleread() drains the queue.
+          wakeup(&cons.r);
           release(&cons.lock);
           return;
         }

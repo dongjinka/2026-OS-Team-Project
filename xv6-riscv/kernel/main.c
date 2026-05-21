@@ -20,7 +20,6 @@ main()
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
     procinit();      // process table
-    agentcmd_init(); // agent command queue
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller
@@ -28,7 +27,9 @@ main()
     binit();         // buffer cache
     iinit();         // inode table
     fileinit();      // file table
-    virtio_disk_init(); // emulated hard disk
+    virtio_disk_init(); // emulated hard disk — must precede any fs I/O
+    cacheinit();     // LLM response cache (reads /cache.bin on disk)
+    agentinit();     // agent dispatcher queue (both agent_q + agentq locks)
     userinit();      // first user process
     __sync_synchronize();
     started = 1;

@@ -46,3 +46,6 @@ entry("setpriority");
 entry("getpriority");
 entry("jail");
 entry("agent_recv");
+entry("set_cache");
+entry("get_cache");
+entry("dispatch");

@@ -24,3 +24,6 @@
 #define SYS_getpriority 23
 #define SYS_jail   24
 #define SYS_agent_recv 25
+#define SYS_set_cache  26
+#define SYS_get_cache  27
+#define SYS_dispatch   28

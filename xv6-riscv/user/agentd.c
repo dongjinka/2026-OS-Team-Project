@@ -30,9 +30,11 @@ struct fn {
 
 static struct fn table[] = {
   { "PRINT",   1, 10 },
+  { "CHAT",    1, 10 },
   { "READ",    1,  8 },
   { "WRITE",   1, 12 },
   { "LS",      1,  8 },
+  { "PS",      1,  6 },
   { "NICE",    1,  5 },
   { "LIST",    1,  0 },
   { "SETPRIO", 1,  5 },
@@ -65,6 +67,23 @@ static void
 do_print(char *arg)
 {
   printf("[agentd] %s\n", arg);
+}
+
+// CHAT <text> — natural-language response. agent.py forwards cache hits
+// of "CHAT|..." as well as the LLM's final answer through this path.
+static void
+do_chat(char *arg)
+{
+  printf("[chat] %s\n", arg);
+}
+
+// PS — process list. xv6 does not yet expose process info via syscall to
+// userspace (procdump() is kernel-only). Stub until a sys_proclist is
+// added in a follow-up PR.
+static void
+do_ps(char *arg)
+{
+  printf("[agentd] PS: no userspace proc-list syscall yet; use kernel Ctrl-P\n");
 }
 
 // READ <path> — print a file's contents (path is chroot'd to the jail)
@@ -217,9 +236,11 @@ execute(char *line)
       setpriority(getpid(), table[i].priority);
 
       if(streq(cmd, "PRINT"))        do_print(arg);
+      else if(streq(cmd, "CHAT"))    do_chat(arg);
       else if(streq(cmd, "READ"))    do_read(arg);
       else if(streq(cmd, "WRITE"))   do_write(arg);
       else if(streq(cmd, "LS"))      do_ls(arg);
+      else if(streq(cmd, "PS"))      do_ps(arg);
       else if(streq(cmd, "NICE"))    do_nice(arg);
       else if(streq(cmd, "LIST"))    do_list(arg);
       else if(streq(cmd, "SETPRIO")) do_setprio(arg);
@@ -234,7 +255,7 @@ main(void)
 {
   // Ensure the jail directory exists, then confine ourselves to it.
   // (mkdir must happen before jail() — afterward '/' is the jail root.)
-  mkdir(JAIL);
+  mkdir(JAIL);     // -1 if it already exists from a previous boot — OK
   if(jail(JAIL) < 0){
     printf("[agentd] FATAL: jail(%s) failed\n", JAIL);
     exit(1);
