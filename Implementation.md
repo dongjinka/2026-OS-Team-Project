@@ -119,18 +119,19 @@ def _handle_llm_req(self, prompt):
 ```
 
 `ACTION_TABLE`은 JSON 액션을 와이어 명령으로 번역한다 (`REQ|`·`LLM_RESP|`
-래핑은 위에서 처리). **총 8개 액션** — Phase 5 액션 확장 결과:
+래핑은 위에서 처리). **총 8개 액션**, 모두 jail 안 `agentd` 가 실행하거나
+(`exec`/`kill`) 커널 `agent_blocked()` 가 차단:
 
-| JSON action                                            | 번역 결과              | ACL 비트   |
-| ------------------------------------------------------ | ---------------------- | ---------- |
-| `{"action":"print","msg":"hi"}`                        | `PRINT\|hi`            | `ACL_PRINT`|
-| `{"action":"chat","msg":"hi back"}`                    | `CHAT\|hi back`        | `ACL_CHAT` |
-| `{"action":"read","path":"/foo"}`                      | `READ\|/foo`           | `ACL_READ` |
-| `{"action":"write","path":"/foo","content":"data"}`    | `WRITE\|/foo\|data`    | `ACL_WRITE`|
-| `{"action":"ls","path":"/"}`                           | `LS\|/`                | `ACL_LS`   |
-| `{"action":"ps"}`                                      | `PS`                   | `ACL_PS`   |
-| `{"action":"kill","pid":7}`                            | `KILL\|7`              | `ACL_KILL` |
-| `{"action":"nice","pid":5,"priority":3}`               | `NICE\|5:3`            | `ACL_NICE` |
+| JSON action                                            | 번역 결과              | 실행 경로                        |
+| ------------------------------------------------------ | ---------------------- | -------------------------------- |
+| `{"action":"print","msg":"hi"}`                        | `PRINT\|hi`            | jailed agentd → `printf`         |
+| `{"action":"chat","msg":"hi back"}`                    | `CHAT\|hi back`        | jailed agentd → `printf`         |
+| `{"action":"read","path":"/foo"}`                      | `READ\|/foo`           | jailed agentd → `open + read`    |
+| `{"action":"write","path":"/foo","content":"data"}`    | `WRITE\|/foo\|data`    | jailed agentd → `open + write`   |
+| `{"action":"ls","path":"/"}`                           | `LS\|/`                | jailed agentd → `dirent` 순회    |
+| `{"action":"ps"}`                                      | `PS`                   | jailed agentd → stub (sys_proclist 후속) |
+| `{"action":"kill","pid":7}`                            | `KILL\|7`              | jailed agentd → `kill` → **agent_blocked 차단** |
+| `{"action":"nice","pid":5,"priority":3}`               | `NICE\|5:3`            | jailed agentd → `setpriority`    |
 
 Solar 응답이 `JSONDecodeError`이거나 액션을 모르면 `PRINT|(llm error)` 등으로
 폴백 — 절대 크래시하지 않는다.
@@ -144,9 +145,10 @@ prefix 를 부착해 송신한다:
 self.sock.sendall(f"REQ|agent:{self.role}|ASK|{line}\n".encode())
 ```
 
-REPL 내 `:role writer` / `:role admin` / `:role reader` 로 토글. **실제 ACL
-강제는 커널이 담당** — agent.py 의 role 값은 단순히 wire prefix 결정용이다.
-즉 신뢰 경계는 사용자 본인이 아니라 LLM 출력에 있다.
+REPL 내 `:role writer` / `:role admin` / `:role reader` 로 토글. role 값은
+**진단·로깅용** 으로 유지된다 — 실제 sandboxing 의 경계는 **jail** (chroot +
+`agent_blocked()` syscall 가드) 이다. role 은 자유로이 바꿀 수 있지만, 위험한
+syscall (`exec`/`kill`/`mknod`) 은 어떤 role 이든 jail 안에서 거부된다.
 
 ### 1.4 환경 설정 (`.env`)
 
@@ -266,37 +268,38 @@ if (which_dev == 2) {
 `agent_dispatch_now()`가 와이어 형식을 파싱한다. 두 가지 prefix 형태 지원:
 
 ```
-REQ|<CMD>|<arg>                       # role 생략 → reader 로 간주
-REQ|agent:<role>|<CMD>|<arg>          # role = reader / writer / admin
+REQ|<CMD>|<arg>                       # role 생략
+REQ|agent:<role>|<CMD>|<arg>          # role 라벨 (진단용)
 ```
 
-특수 명령(ASK/LLM_RESP/CACHE_\*)은 오케스트레이션 메타-명령이라 ACL 우회.
-나머지는 `exec_cmd(role, cmd, arg)` 에서 ACL 검사 후 실행.
+라우팅 결정은 **메타-명령 vs 일반 명령**:
+- ASK/LLM_RESP/CACHE_GET/CACHE_SET — **in-kernel 처리** (`handle_*`). 캐시
+  (cache.c) 가 커널 메모리이므로 불가피.
+- 그 외 모든 명령은 **`forward_to_agentd()` 로 agentq 에 enqueue**. jailed
+  agentd 가 `sys_agent_recv()` 로 pull 한 뒤 자기 chroot 안에서 실행.
 
-| 명령어                              | 동작                                                       | 기본 ACL          |
-| ----------------------------------- | ---------------------------------------------------------- | ----------------- |
-| `REQ\|ASK\|<프롬프트>`              | **오케스트레이션 진입점** — 캐시 조회 + (필요 시) LLM_REQ  | 우회              |
-| `REQ\|LLM_RESP\|<CMD>\|<arg>`       | agent.py의 Solar 응답 — 캐시 저장 + 디스패치               | 우회 (내부 cmd가 받음) |
-| `REQ\|PRINT\|<msg>`                 | `printf("[agent] %s\n", msg)`                              | 전 role 허용      |
-| `REQ\|CHAT\|<msg>`                  | `printf("[chat] %s\n", msg)` — 자연어 응답 노출           | 전 role 허용      |
-| `REQ\|READ\|<path>`                 | `namei + readi`, 결과를 256B 상한으로 `[agent]` 출력       | 전 role 허용      |
-| `REQ\|LS\|<path>`                   | `struct dirent` 순회 — 인-커널 ls                          | 전 role 허용      |
-| `REQ\|PS`                           | `proc[NPROC]` 순회 → pid/state/name/priority 출력          | 전 role 허용      |
-| `REQ\|WRITE\|<path>\|<content>`     | `create(T_FILE) + writei` — 기존 파일이면 `itrunc` 후 덮어씀 | writer + admin    |
-| `REQ\|KILL\|<pid>`                  | `kkill(pid)` — **pid ≤ 2 거부** (init/sh 보호)              | admin only        |
-| `REQ\|NICE\|<pid>:<n>`              | `priority`를 n으로 설정 (0~20)                              | admin only        |
-| `REQ\|CACHE_GET\|<key>`             | 캐시 조회 (수동 디버깅용)                                    | 우회              |
-| `REQ\|CACHE_SET\|<klen>:<key><val>` | 캐시 저장 (수동 디버깅용)                                    | 우회              |
-| 기타                                | `unknown cmd 'X'` 출력 후 무시                              | —                 |
+| 명령어                              | 동작                                                                | 실행 위치                                |
+| ----------------------------------- | ------------------------------------------------------------------- | ---------------------------------------- |
+| `REQ\|ASK\|<프롬프트>`              | **오케스트레이션 진입점** — 캐시 조회 + (필요 시) LLM_REQ           | 커널 in-kernel (메타)                    |
+| `REQ\|LLM_RESP\|<CMD>\|<arg>`       | agent.py의 Solar 응답 — 캐시 저장 + agentq 로 forward               | 커널 in-kernel (메타)                    |
+| `REQ\|PRINT\|<msg>`                 | `printf("[agentd] %s\n", msg)`                                      | jailed agentd                            |
+| `REQ\|CHAT\|<msg>`                  | `printf("[chat] %s\n", msg)`                                        | jailed agentd                            |
+| `REQ\|READ\|<path>`                 | `open(path, O_RDONLY)` + `read` (chroot 안)                         | jailed agentd                            |
+| `REQ\|LS\|<path>`                   | `open(".") + read(&dirent)` 순회 (chroot 안)                        | jailed agentd                            |
+| `REQ\|PS`                           | stub — 사용자 공간 proc-list syscall 부재 (`sys_proclist` 후속)     | jailed agentd                            |
+| `REQ\|WRITE\|<path>\|<content>`     | `open(O_CREATE\|O_RDWR) + write` (chroot 안)                        | jailed agentd                            |
+| `REQ\|KILL\|<pid>`                  | `kill(pid)` 호출 시 커널 `agent_blocked()` 가 즉시 거부             | **차단** (jail boundary)                 |
+| `REQ\|NICE\|<pid>:<n>`              | `setpriority(pid, n)` (kernel-class 음수 거부)                      | jailed agentd                            |
+| `REQ\|CACHE_GET\|<key>`             | 캐시 조회 (수동 디버깅용)                                            | 커널 in-kernel (메타)                    |
+| `REQ\|CACHE_SET\|<klen>:<key><val>` | 캐시 저장 (수동 디버깅용)                                            | 커널 in-kernel (메타)                    |
+| 기타                                | jailed agentd: `unknown cmd 'X'`                                    | jailed agentd                            |
 
-거부 시 `[deny] role=<role> cmd=<CMD>` 한 줄을 출력하고 핸들러를 건너뛴다.
-존재하지 않는 role 은 `[agent] unknown role: ...` 으로 거절.
+**실행 경로 — 두 단계 큐**:
+- *agent_q* (stage 1, `AGENT_Q_LEN=8`): 인터럽트 → `agent_dispatch_now`. 모든 라인이 일단 여기로.
+- *agentq* (stage 2, `AGENTQ_N=16`): kernel → jailed agentd. 메타가 아닌 라인만 여기로.
 
-**실행 경로 분리** — 커널 스택(4 KB) 오버플로우를 막기 위해:
-- `exec_cmd(role, cmd, arg)` — ACL 검사 후 분리된 CMD/arg 를 실행. fs 보조 함수
-  (`do_read`/`do_write`/`do_ls`/`do_ps`) 로 위임.
-- `exec_wire(role, cmdarg)` — `"CMD|arg"` 문자열을 `|` 로 쪼개 `exec_cmd` 호출.
-  새 버퍼·재귀 없음 (초기 구현의 스택 오버플로우 버그 수정 — §6.3 참고).
+라인 forward 시 wire 는 `forward_to_agentd()` (REQ| 접두어 보존) 또는 cache hit 에서
+`forward_wire_to_agentd()` (REQ| 재포장) 로 enqueue.
 
 ### 3.3 시리얼 감지 훅 ([kernel/console.c](xv6-riscv/kernel/console.c))
 
@@ -393,13 +396,18 @@ set/get/miss/overwrite/eviction/disk-promote/long-key/bad-args 8개 시나리오
 ### 4.7 커널 주관 오케스트레이션 (`REQ|ASK` / `REQ|LLM_RESP`)
 
 캐시 사용의 **결정 로직이 커널 안에** 있다 — agent.py는 의사결정을 하지 않는다.
+캐시 히트 시 wire 는 *agentd 큐로 forward* 되어 jail 안에서 실행된다.
 
 **`REQ|ASK|<프롬프트>` 처리** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)):
 ```c
-int clen = cache_get(prompt, plen, cached, sizeof(cached));
-if (clen >= 0) {                    // 캐시 HIT
+int clen = cache_get_exact(prompt, plen, cached, sizeof(cached));
+if (clen >= 0) {                    // 캐시 HIT (exact)
     printf("[cache] HIT\n");
-    exec_wire(cached);              // 캐시된 "CMD|arg" 즉시 실행 — agent.py 미개입
+    forward_wire_to_agentd(cached); // 캐시된 "CMD|arg" 를 REQ| 래핑 후 agentd 큐로
+} else if ((clen = cache_get_semantic(...)) >= 0
+           && (CHAT/PRINT prefix)) {
+    printf("[cache] SEMANTIC HIT score=%d/64\n", score);
+    forward_wire_to_agentd(cached); // 의미 히트는 CHAT/PRINT 응답에만 허용 (부작용 0)
 } else {                            // 캐시 MISS
     copy_line(pending_prompt, prompt, ...);  // 프롬프트 보관 (캐시 키로 쓸 것)
     printf("LLM_REQ|%s\n", prompt);          // agent.py에 Solar 호출 요청
@@ -409,83 +417,120 @@ if (clen >= 0) {                    // 캐시 HIT
 **`REQ|LLM_RESP|<CMD>|<arg>` 처리**:
 ```c
 cache_set(pending_prompt, pending_len, wire, wire_len);  // 결과를 캐시에 저장
-exec_wire(pending_role, wire);                           // 보관한 role 로 디스패치
+forward_wire_to_agentd(wire);                            // wire 를 agentd 큐로
 ```
 
-비동기 단일-슬롯 설계: `pending_prompt` + `pending_role` 정적 변수 한 쌍. agent.py
-REPL이 직렬이라 동시에 둘 이상의 요청이 진행되지 않으므로 안전.
+비동기 단일-슬롯 설계: `pending_prompt` 정적 변수. agent.py REPL이 직렬이라
+동시에 둘 이상의 요청이 진행되지 않으므로 안전. (과거 `pending_role` 는 jail 통합
+으로 의미가 사라져 제거됨 — role 은 wire 진단 라벨로만 남는다.)
 
 ---
 
-## 5. Phase 5 — 역할(role) 기반 ACL 샌드박싱
+## 5. Phase 5 — Jail 기반 sandboxing
 
-**파일:** [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c) (확장)
+**파일:** [kernel/syscall.c](xv6-riscv/kernel/syscall.c) (agent_blocked),
+[kernel/sysfile.c](xv6-riscv/kernel/sysfile.c) (sys_jail),
+[kernel/fs.c](xv6-riscv/kernel/fs.c) (namex chroot 훅),
+[kernel/proc.h](xv6-riscv/kernel/proc.h) (`is_agent` + `jail_root`),
+[user/agentd.c](xv6-riscv/user/agentd.c) (jailed runtime),
+[user/agentdemo.c](xv6-riscv/user/agentdemo.c) (4 시연 케이스).
 
 project.md Direction A의 핵심 키워드 *"tool-use sandbox / file/shell tool
-permissions"* 의 직접 정합. 8개 액션 각각에 ACL 비트를 부여하고, 와이어 prefix
-에 박힌 role 에 따라 커널이 강제한다.
+permissions / secure execution sandbox the LLM can call into"* 의 정합 메커니즘.
+**프로세스 단위 격리** + **위험 syscall 의 커널 거부** 두 축.
 
-### 5.1 역할과 ACL 마스크
+> **역사적 맥락**: PR 1 통합 이전, Sejoong 브랜치에는 *역할 기반 ACL 시제품*
+> (reader/writer/admin × 8 액션 비트 마스크) 가 있었다. 그 가드는 jail 모델로
+> 흡수됐고, 측정 도구 (`eval acl`) 와 `agent:<role>` wire 라벨은 진단·시연용으로
+> 남는다. 아래는 *현재 통합본의 jail 모델* 만 서술.
 
-```c
-enum agent_role { ROLE_READER=0, ROLE_WRITER=1, ROLE_ADMIN=2 };
+### 5.1 진입 — `init → fork → exec(agentd) → jail()`
 
-static const ushort acl_mask[3] = {
-  /* reader */ ACL_PRINT|ACL_CHAT|ACL_READ|ACL_LS|ACL_PS,
-  /* writer */ ACL_PRINT|ACL_CHAT|ACL_READ|ACL_LS|ACL_PS|ACL_WRITE,
-  /* admin  */ 0xFFFF,
-};
-```
-
-| Role   | PRINT/CHAT | READ/LS/PS | WRITE | KILL | NICE |
-| ------ | ---------- | ---------- | ----- | ---- | ---- |
-| reader | ✓          | ✓          | ✗     | ✗    | ✗    |
-| writer | ✓          | ✓          | ✓     | ✗    | ✗    |
-| admin  | ✓          | ✓          | ✓     | ✓    | ✓    |
-
-### 5.2 와이어 프로토콜 확장
-
-```
-REQ|<CMD>|<arg>                       # role 생략 → 안전한 기본값 reader
-REQ|agent:<role>|<CMD>|<arg>          # role 명시
-REQ|agent:<role>|ASK|<프롬프트>       # ASK 도 role 보존 → LLM_RESP 에 재적용
-```
-
-ASK 가 캐시 miss → `pending_role` 에 보관. 이후 도착한 LLM_RESP 가 unwrap 한
-실제 CMD는 보관된 role 로 ACL 검사된다 (cached HIT 도 동일하게 caller role 사용).
-
-### 5.3 ACL 강제 지점 — `exec_cmd(role, cmd, arg)` 진입부
+xv6 부팅 시퀀스에 jailed agent 데몬을 자동 기동:
 
 ```c
-ushort bit = cmd_to_acl(cmd);
-if(bit && (acl_mask[role] & bit) == 0){
-  printf("[deny] role=%s cmd=%s\n", role_name[role], cmd);
-  return;
+// user/init.c
+pid = fork();
+if (pid == 0) {
+    char *aargv[] = { "agentd", 0 };
+    exec("agentd", aargv);       // → user/agentd.c main()
+    exit(1);
 }
 ```
 
-ACL 우회 명령(ASK/LLM_RESP/CACHE_\*)은 `agent_dispatch_now` 진입부에서 먼저
-처리되므로 ACL 검사를 받지 않는다 — 이들은 오케스트레이션 메타-명령일 뿐, 실
-액션은 unwrap 한 내부 cmd 가 받는다.
+```c
+// user/agentd.c
+mkdir(JAIL);                     // "/agentbox"
+if (jail(JAIL) < 0) exit(1);     // 이 시점부터 '/' == /agentbox
+while (agent_recv(line) >= 0)    // jailed: 큐에서 명령 pull
+    execute(line);
+```
 
-### 5.4 신뢰 경계
+`jail()` 은 **단방향** — 한번 들어가면 못 나옴. 사용자 셸은 *jail 밖* 이므로
+디버깅·관찰 가능하지만, LLM 발화 명령은 모두 jail 안에서 실행된다.
 
-agent.py REPL의 `:role admin` 토글은 클라이언트가 자유로이 바꿀 수 있는 값이지만,
-ACL 강제는 커널이 한다 — 즉 **공격 표면은 사용자 본인이 아니라 LLM의 잘못된 액션 선택**
-이라는 설계 의도. (Direction A의 "secure execution sandbox the LLM can call into"
-키워드 정합.)
+### 5.2 chroot 훅 — `kernel/fs.c::namex`
+
+`is_agent==1` 인 프로세스는 절대 경로 `/foo` 를 `<jail_root>/foo` 로 재기점하고,
+`..` 가 jail_root 위로 가는 시도를 차단:
+
+```c
+// fs.c namex 내부
+if (myproc()->is_agent && myproc()->jail_root != 0)
+    ip = idup(myproc()->jail_root);     // '/' → jail_root
+// ...
+if (eq(name, "..") && ip == myproc()->jail_root)
+    continue;                            // '..' 탈출 차단
+```
+
+→ agentdemo 케이스 2: `open("/../init")` → `-1`.
+
+### 5.3 위험 syscall 가드 — `kernel/syscall.c::agent_blocked`
+
+```c
+static int agent_blocked(int num) {
+    return num == SYS_exec || num == SYS_kill || num == SYS_mknod;
+}
+
+void syscall(void) {
+    int num = p->trapframe->a7;
+    if (p->is_agent && agent_blocked(num)) {
+        printf("[sandbox] pid %d (%s): syscall %d blocked\n", ...);
+        p->trapframe->a0 = -1;
+        return;
+    }
+    p->trapframe->a0 = syscalls[num]();
+}
+```
+
+차단 3종 사유:
+- `SYS_exec` — LLM 이 임의 바이너리로 자신을 교체하지 못하게 (jail 우회 방지)
+- `SYS_kill` — 시스템 프로세스 (init, sh) 보호
+- `SYS_mknod` — 디바이스 노드 생성 차단
+
+### 5.4 검증 — `user/agentdemo.c` 4 케이스
+
+```
+1. open("/notes.txt", O_RDONLY)         → jail 내 파일 접근 OK
+2. open("/../init", O_RDONLY)           → -1 (.. 탈출 차단)
+3. setpriority(getpid(), -1)            → -1 (kernel-class 거부)
+4. exec("/echo", argv)                  → -1 (agent_blocked)
+```
+
+부팅 후 `$ agentdemo` 로 실행. 위 4 줄이 모두 *OK* 로 출력되면 jail 통과.
 
 ### 5.5 userspace 진입로 — `sys_dispatch` 시스템 콜
 
-다중 에이전트 데모와 평가지표 측정을 위해 userspace 에서 직접 `agent_dispatch_now`
-를 호출할 수 있는 syscall 을 추가했다 ([sysproc.c](xv6-riscv/kernel/sysproc.c)):
+다중 에이전트 데모와 평가지표 측정을 위해 userspace 에서 직접 디스패처에
+와이어 라인을 던질 수 있는 syscall ([sysproc.c](xv6-riscv/kernel/sysproc.c)):
 
 ```c
 int dispatch(const char *line);    // line = "REQ|agent:<role>|<CMD>|<arg>"
 ```
 
-QEMU 시리얼 TCP 입력과 동일한 와이어 형식. 5개 파일 plumbing(syscall.h/c, sysproc.c,
-usys.pl, user.h).
+QEMU 시리얼 TCP 입력과 동일한 와이어 형식. 내부적으로 `agent_dispatch_now()`
+를 부르고, 그 결과 메타-명령은 in-kernel 처리, 일반 명령은 agentd 큐로 forward.
+5개 파일 plumbing(syscall.h/c, sysproc.c, usys.pl, user.h).
 
 ---
 
