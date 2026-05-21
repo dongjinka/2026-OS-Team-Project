@@ -127,10 +127,22 @@ sys_setpriority(void)
   if(priority < 0 && myproc()->priority >= 0)
     return -1;
 
+  // Snapshot the caller's class once, before taking any p->lock — so the
+  // per-target check below never reads myproc()->priority while holding an
+  // unrelated process's lock.
+  int caller_kernel = (myproc()->priority < 0);
+
   struct proc *p;
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     if(p->pid == pid){
+      // F2/F7: a user-class caller may not modify a kernel-class process
+      // (e.g. init). Otherwise the jailed agent could demote the supervisor
+      // out of kernel-class via NICE. Only kernel-class callers may.
+      if(p->priority < 0 && !caller_kernel){
+        release(&p->lock);
+        return -1;
+      }
       p->priority = priority;
       release(&p->lock);
       return 0;
@@ -252,6 +264,7 @@ sys_procinfo(void)
   int n = 0;
   for(struct proc *p = proc; p < &proc[NPROC] && n < max; p++){
     struct procinfo pi;
+    memset(&pi, 0, sizeof(pi));   // don't leak kernel stack via name[]'s tail
     acquire(&p->lock);
     if(p->state == UNUSED){
       release(&p->lock);

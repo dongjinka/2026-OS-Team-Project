@@ -88,13 +88,20 @@ xv6 커널에 직접 매핑했다.
 
 ### 1.3 권한 가드 (F2의 핵심)
 
-`sys_setpriority`는 **user-클래스 프로세스(priority ≥ 0)가 누군가에게 음수
-priority를 부여하지 못하도록** 거부한다. → 권한 상승 차단.
+`sys_setpriority`는 **두 방향**으로 user/kernel 경계를 지킨다:
 
-```c
-if(priority < 0 && myproc()->priority >= 0)
-  return -1;
-```
+1. **상승 차단** — user-클래스(priority ≥ 0)가 누구에게도 음수 priority를 부여 불가:
+   ```c
+   if(priority < 0 && myproc()->priority >= 0)
+     return -1;
+   ```
+2. **커널-클래스 보호** — user-클래스 호출자는 **이미 커널-클래스(priority < 0)인
+   대상**(예: init)을 변경 불가. 대상의 현재 priority를 락 하에 확인 후 거부:
+   ```c
+   if(p->priority < 0 && !caller_kernel){ release(&p->lock); return -1; }
+   ```
+   → 격리 agent가 `NICE`로 init/커널-클래스를 user 범위로 끌어내리는 강등을 차단.
+   커널-클래스 호출자만 가능.
 
 ### 1.4 init은 커널-클래스
 
