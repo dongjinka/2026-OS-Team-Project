@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "vm.h"
 #include "deny.h"
+#include "procinfo.h"
 
 extern struct proc proc[NPROC];
 
@@ -229,5 +230,44 @@ sys_get_deny(void)
   int n = deny_snapshot(kbuf, max);
   if(copyout(myproc()->pagetable, uaddr, kbuf, n + 1) < 0)
     return -1;
+  return n;
+}
+
+// procinfo(buf, max): copy up to `max` non-UNUSED process entries into the
+// user array `buf`. Returns the count. Read-only observability: lets a user
+// program (and the LLM agent via agentd PS) see pid/state/priority/name so it
+// can reason about the system. Each proc's lock is held only long enough to
+// snapshot one entry; copyout happens after release.
+uint64
+sys_procinfo(void)
+{
+  uint64 uaddr;
+  int max;
+  argaddr(0, &uaddr);
+  argint(1, &max);
+  if(max <= 0)
+    return -1;
+
+  struct proc *self = myproc();
+  int n = 0;
+  for(struct proc *p = proc; p < &proc[NPROC] && n < max; p++){
+    struct procinfo pi;
+    acquire(&p->lock);
+    if(p->state == UNUSED){
+      release(&p->lock);
+      continue;
+    }
+    pi.pid = p->pid;
+    pi.state = p->state;
+    pi.priority = p->priority;
+    pi.is_agent = p->is_agent;
+    safestrcpy(pi.name, p->name, sizeof(pi.name));
+    release(&p->lock);
+
+    if(copyout(self->pagetable, uaddr + (uint64)n * sizeof(pi),
+               (char *)&pi, sizeof(pi)) < 0)
+      return -1;
+    n++;
+  }
   return n;
 }

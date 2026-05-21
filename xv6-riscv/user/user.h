@@ -1,6 +1,7 @@
 #define SBRK_ERROR ((char *)-1)
 
 struct stat;
+struct procinfo;
 
 // system calls
 int fork(void);
@@ -30,6 +31,7 @@ int jail(const char*);
 int agent_recv(char*);
 int set_deny(int, const char*);
 int get_deny(char*, int);
+int procinfo(struct procinfo*, int);
 
 // ulib.c
 int stat(const char*, struct stat*);

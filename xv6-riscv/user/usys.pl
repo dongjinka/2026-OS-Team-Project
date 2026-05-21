@@ -48,3 +48,4 @@ entry("jail");
 entry("agent_recv");
 entry("set_deny");
 entry("get_deny");
+entry("procinfo");

@@ -15,6 +15,12 @@
 ## [Unreleased]
 
 ### Added
+- **AI 자기관찰 명령어 셋** — LLM이 환경을 보고 판단하도록 정보 명령 2개 추가.
+  - `PS` — 프로세스 목록(pid·state·priority·name, `[K]`/`[A]`). 신규 syscall
+    `procinfo(buf,max)`(번호 28, `kernel/procinfo.h`)로 proc 스냅샷을 copyout.
+    `NICE`가 대상 pid를 알 수 있게 함(관찰→행동 루프). 표현은 agentd, 데이터는 커널.
+  - `HELP` — 각 명령의 인자 형식(usage) 포함 카탈로그. LLM이 호출법 런타임 확인.
+  - agentd 도구 테이블에 `usage` 필드 추가, `agent.py`에 `ps`/`help` 도구 노출.
 - F7 명령 거부 목록을 **설정 가능**하게 전환. 기존 하드코딩
   `{KILL, EXEC}`을 커널 RAM의 가변 목록(스핀락 보호)으로 바꾸고, 신규
   syscall `set_deny`/`get_deny`(번호 26·27)와 셸 도구 `user/denyctl.c`로

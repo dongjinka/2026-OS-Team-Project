@@ -116,8 +116,11 @@ TOOLS (each runs inside the sandbox):
   write  {"file":"<name>","text":"<content>"}  create/overwrite a file
   print  {"msg":"<text>"}  print a message on the xv6 console
   nice   {"pid":<int>,"priority":<int 0..20>}  change a process's priority
+  ps                       list running processes (pid, state, priority, name)
   list   list the agent runtime's callable functions and their priorities
+  help                     show every command and its argument format
 (There is no "kill" / "exec" — the sandbox blocks them.)
+To change a process's priority with `nice`, first call `ps` to find its pid.
 
 PROTOCOL — on every step reply with EXACTLY ONE JSON object, nothing else:
   to call a tool:  {"thought":"<short reasoning>","tool":"<name>","args":{...}}
@@ -135,6 +138,8 @@ def wire_for(tool: str, args: dict):
     try:
         if tool == "ls":    return "LS|"
         if tool == "list":  return "LIST|"
+        if tool == "ps":    return "PS|"
+        if tool == "help":  return "HELP|"
         if tool == "read":  return f"READ|{args['file']}"
         if tool == "write": return f"WRITE|{args['file']}:{args.get('text','')}"
         if tool == "print": return f"PRINT|{args.get('msg','')}"

@@ -18,8 +18,10 @@
 #include "kernel/stat.h"
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
+#include "kernel/param.h"
 #include "user/user.h"
 #include "kernel/deny.h"
+#include "kernel/procinfo.h"
 
 #define JAIL "/agentbox"
 
@@ -27,16 +29,19 @@ struct fn {
   char *name;
   int   allowed;
   int   priority;
+  char *usage;       // how the LLM calls it (shown by HELP)
 };
 
 static struct fn table[] = {
-  { "PRINT",   1, 10 },
-  { "READ",    1,  8 },
-  { "WRITE",   1, 12 },
-  { "LS",      1,  8 },
-  { "NICE",    1,  5 },
-  { "LIST",    1,  0 },
-  { "SETPRIO", 1,  5 },
+  { "PRINT",   1, 10, "PRINT|<msg>" },
+  { "READ",    1,  8, "READ|<file>" },
+  { "WRITE",   1, 12, "WRITE|<file>:<text>" },
+  { "LS",      1,  8, "LS|" },
+  { "NICE",    1,  5, "NICE|<pid>:<prio 0..20>" },
+  { "LIST",    1,  0, "LIST|" },
+  { "SETPRIO", 1,  5, "SETPRIO|<FN>:<prio 0..20>" },
+  { "PS",      1,  8, "PS|" },
+  { "HELP",    1,  0, "HELP|" },
 };
 #define NFN ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -216,6 +221,41 @@ do_setprio(char *arg)
   printf("[agentd] SETPRIO: no such function '%s'\n", arg);
 }
 
+// PS — report the live process table so the agent can pick a pid for NICE.
+static void
+do_ps(char *arg)
+{
+  static const char *st[] = {
+    "unused", "used", "sleep", "runble", "run", "zombie"
+  };
+  struct procinfo pi[NPROC];
+  int n = procinfo(pi, NPROC);
+  if(n < 0){
+    printf("[agentd] PS: procinfo failed\n");
+    return;
+  }
+  printf("[agentd] processes (pid | state | prio | name):\n");
+  for(int i = 0; i < n; i++){
+    const char *s = (pi[i].state >= 0 && pi[i].state < 6) ? st[pi[i].state] : "?";
+    printf("[agentd]   %d\t%s\t%d\t%s%s%s\n",
+           pi[i].pid, s, pi[i].priority, pi[i].name,
+           pi[i].priority < 0 ? " [K]" : "", pi[i].is_agent ? " [A]" : "");
+  }
+}
+
+// HELP — self-describing command catalog: how to call each tool (usage),
+// whether it's allowed, and the priority it runs at. Lets the LLM discover
+// the command set and argument formats at runtime.
+static void
+do_help(char *arg)
+{
+  printf("[agentd] commands (usage | access | priority):\n");
+  for(int i = 0; i < NFN; i++)
+    printf("[agentd]   %s\t%s\tprio=%d\n",
+           table[i].usage, table[i].allowed ? "ALLOW" : "DENY",
+           table[i].priority);
+}
+
 // ───────────────────────────── dispatch ─────────────────────────────
 
 static void
@@ -247,6 +287,8 @@ execute(char *line)
       else if(streq(cmd, "NICE"))    do_nice(arg);
       else if(streq(cmd, "LIST"))    do_list(arg);
       else if(streq(cmd, "SETPRIO")) do_setprio(arg);
+      else if(streq(cmd, "PS"))      do_ps(arg);
+      else if(streq(cmd, "HELP"))    do_help(arg);
       return;
     }
   }

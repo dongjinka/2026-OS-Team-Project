@@ -266,19 +266,28 @@ agentd는 시작 직후 `jail("/agentbox")`로 자기 격리, 큐에서 명령�
 
 **도구 테이블** (F7 화이트리스트 + F8 함수별 priority):
 
-| FN       | allowed | priority |
-|----------|---------|----------|
-| PRINT    | 1       | 10       |
-| READ     | 1       |  8       |
-| WRITE    | 1       | 12       |
-| LS       | 1       |  8       |
-| NICE     | 1       |  5       |
-| LIST     | 1       |  0       |
-| SETPRIO  | 1       |  5       |
+| FN       | allowed | priority | 비고 |
+|----------|---------|----------|------|
+| PRINT    | 1       | 10       | |
+| READ     | 1       |  8       | |
+| WRITE    | 1       | 12       | |
+| LS       | 1       |  8       | |
+| NICE     | 1       |  5       | `<pid>` 대상 — PS로 pid 확인 후 사용 |
+| LIST     | 1       |  0       | F8 우선순위/접근 뷰 |
+| SETPRIO  | 1       |  5       | |
+| PS       | 1       |  8       | **AI 자기관찰** — 프로세스 목록(pid·state·prio·name) |
+| HELP     | 1       |  0       | **AI 자기관찰** — usage 포함 명령 카탈로그 |
 
 각 도구 실행 직전 `setpriority(getpid(), table[i].priority)` 호출
-([agentd.c:217](xv6-riscv/user/agentd.c)) → **F8의 "함수별 priority"가
+([agentd.c](xv6-riscv/user/agentd.c)) → **F8의 "함수별 priority"가
 실제 스케줄러에 반영**된다. `SETPRIO <FN>:<prio>`로 LLM이 런타임에 재조정 가능.
+
+**AI 자기관찰 명령어 셋**: LLM이 환경을 보고 판단하도록 두 정보 명령을 둔다.
+**PS**는 신규 syscall `procinfo(buf,max)`([sysproc.c](xv6-riscv/kernel/sysproc.c),
+[procinfo.h](xv6-riscv/kernel/procinfo.h))로 proc 테이블 스냅샷을 받아
+pid·state·priority·name(`[K]`/`[A]` 포함)을 출력 — `NICE`가 대상 pid를 알 수
+있게 한다. 표현은 유저(agentd)에서, 데이터는 커널에서(`get_deny` 패턴과 동일).
+**HELP**는 각 명령의 인자 형식(usage)을 출력해 LLM이 호출법을 런타임 확인한다.
 
 ### 3.4 이중 방어
 
@@ -441,16 +450,17 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 | [kernel/main.c](xv6-riscv/kernel/main.c)                                   | `agentcmd_init()` 호출 |
 | [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny` 등록, agent 위험 syscall 차단 |
 | [kernel/sysfile.c](xv6-riscv/kernel/sysfile.c)                             | `sys_jail()` 신규 |
-| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()` 신규 |
+| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()`, `sys_procinfo()` 신규 |
 | [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | 명령 큐 + **설정 가능한** 거부 목록(가변·스핀락) + `deny_add/remove/reset/clear/snapshot` |
 | [kernel/deny.h](xv6-riscv/kernel/deny.h)                                   | **신규** — 거부 목록 op 상수(커널·user 공유) |
+| [kernel/procinfo.h](xv6-riscv/kernel/procinfo.h)                           | **신규** — `procinfo` 구조체(프로세스 스냅샷, 커널·user 공유) |
 | [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get` 프로토타입 |
 | [user/init.c](xv6-riscv/user/init.c)                                       | `agentd` 자동 기동 + 부팅 시 `denyctl load` 1회 |
 | [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()`·`set_deny()`·`get_deny()` 스텁 |
-| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영 |
+| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영; `PS`·`HELP` 자기관찰 명령 + usage |
 | [user/denyctl.c](xv6-riscv/user/denyctl.c)                                 | **신규** — 거부 목록 관리 셸 도구(list/add/rm/reset/save/load) |
 | [user/agentdemo.c](xv6-riscv/user/agentdemo.c)                             | **신규** — F2·F7 데모 |
 | [user/cfs_share.c](xv6-riscv/user/cfs_share.c)                             | **신규** — CFS 점유율 정량 벤치 |
 | [mkfs/mkfs.c](xv6-riscv/mkfs/mkfs.c)                                       | **복원** — `.gitignore` 패턴 문제로 누락돼 있던 것 |
-| [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화 |
+| [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화; `ps`·`help` 도구 노출 |
 | [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd` UPROGS 등록 |

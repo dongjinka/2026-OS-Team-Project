@@ -117,9 +117,11 @@ F2 · F3 · F4 · F7 · F8 + `agent.py` 자율 에이전트 루프를 구현했�
 - 시작 즉시 `jail("/agentbox")`로 자기 격리 → 명령 큐에서 명령을 받아
   **jail 안에서** 실행.
 - 도구 테이블 보유 (F7 화이트리스트 + F8 함수별 priority):
-  `PRINT` · `READ` · `WRITE` · `LS` · `NICE` · `LIST` · `SETPRIO`.
+  `PRINT` · `READ` · `WRITE` · `LS` · `NICE` · `LIST` · `SETPRIO` · `PS` · `HELP`.
 - 각 도구 실행 전 `setpriority(self, table[i].priority)`로 함수별 우선순위
   적용 → F8의 "LLM 주도 priority 커스텀화"가 실제 스케줄러에 반영됨.
+- **AI 자기관찰**: `PS`(프로세스 목록 — 신규 `procinfo` syscall)로 LLM이 pid를
+  파악해 `NICE`에 사용, `HELP`(usage 카탈로그)로 호출법 확인 → 관찰→행동 루프.
 
 **결과**: 사람의 셸 입력은 무제한 그대로. LLM 명령은 모두 chroot jail + 위험
 syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달하지 못함

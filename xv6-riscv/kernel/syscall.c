@@ -107,6 +107,7 @@ extern uint64 sys_jail(void);
 extern uint64 sys_agent_recv(void);
 extern uint64 sys_set_deny(void);
 extern uint64 sys_get_deny(void);
+extern uint64 sys_procinfo(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -138,6 +139,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_agent_recv] sys_agent_recv,
 [SYS_set_deny] sys_set_deny,
 [SYS_get_deny] sys_get_deny,
+[SYS_procinfo] sys_procinfo,
 };
 
 // F7: system calls a sandboxed agent process may not invoke.

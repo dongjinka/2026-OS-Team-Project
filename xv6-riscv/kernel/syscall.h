@@ -26,3 +26,4 @@
 #define SYS_agent_recv 25
 #define SYS_set_deny 26
 #define SYS_get_deny 27
+#define SYS_procinfo 28
