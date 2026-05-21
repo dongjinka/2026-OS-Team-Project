@@ -2,23 +2,26 @@
 
 **Direction A — OS for LLM** (project.md §2). xv6-riscv 운영체제 위에 LLM 에이전트
 런타임을 구현했다. Upstage Solar Pro 를 호스팅·지휘하며, AIOS 논문의 핵심 컴포넌트
-(Agent Scheduler, Tool Manager, Memory/Storage Manager, Tool ACL Sandbox)를 xv6
+(Agent Scheduler, Tool Manager, Memory/Storage Manager, Jailed Agent Runtime)를 xv6
 커널에 직접 구현하여, 자연어 입력을 운영체제 액션으로 번역·실행한다.
 
 ## 핵심 기능
 
-- **8개 액션 도구**: `PRINT`/`CHAT`/`READ`/`LS`/`PS`/`WRITE`/`KILL`/`NICE` — LLM이
-  자연어를 JSON 액션으로 번역하면 커널 디스패처가 실제 동작 수행
-- **역할 기반 ACL 샌드박싱** (Phase 5): reader/writer/admin 3-role 정적 정책,
-  `[deny]` 거부 로그
-- **LLM 응답 캐시 + 디스크 스왑**: FNV-1a 64-bit 해시 키, 16 슬롯 RAM LRU + 1 MB
-  `/cache.bin` 디스크 오버레이 — 동일 프롬프트 재호출 비용 0
+- **8개 액션 도구**: `PRINT`/`CHAT`/`READ`/`LS`/`PS`/`WRITE`/`NICE`/`SETPRIO` — LLM이
+  자연어를 JSON 액션으로 번역하면 jail 안의 `agentd` 가 실제 동작 수행
+- **Jail 기반 샌드박싱** (Phase 5): `init` 이 `fork → exec(agentd) → jail("/agentbox")`
+  로 에이전트를 *프로세스 단위 chroot* 안에 가둠. 위험 syscall (`exec`/`kill`/`mknod`)
+  은 커널 `agent_blocked()` 가 거부. 사용자 셸은 jail 밖이라 진단 가능
+- **LLM 응답 캐시 (의미 매칭)**: FNV-1a 64-bit 해시 정확 매치 + **MinHash 64-D
+  signature** 기반 Jaccard ≥ 7/10 paraphrase 매칭. 16 슬롯 RAM LRU + 1 MB
+  `/cache.bin` 디스크 오버레이. CHAT/PRINT 응답에만 semantic hit 허용
 - **CFS 스케줄러**: `vruntime` + priority 가중치, 다중 에이전트 공정 분배
-- **커널-주관 오케스트레이션**: 캐시 조회·LLM 호출 판단·디스패치 모두 xv6 커널
-  안에서 — `agent.py` 는 Solar API 프록시 (의사결정 0)
-- **다중 에이전트 데모**: 4개 자식 프로세스가 서로 다른 role 로 동시 작동,
-  CFS 시분할 시각화
-- **평가지표 측정**: cache hit-rate / ACL deny-rate / CFS fairness — `eval` 셸 명령
+- **커널-주관 오케스트레이션**: 캐시 조회·LLM 호출 판단·디스패치 메타-명령은 xv6
+  커널이 처리, 위험 명령 실행은 jail 안 agentd — `agent.py` 는 Solar API 프록시
+  (의사결정 0)
+- **다중 에이전트 데모**: 4개 자식 프로세스가 동시 dispatch, CFS 시분할 + inode
+  sleeplock 직렬화 시각화
+- **평가지표 측정**: cache hit-rate (exact + semantic) / CFS fairness — `eval` 셸 명령
 
 ## 기술 스택
 
@@ -34,17 +37,24 @@
 ## 시스템 구성도
 
 ```
- ┌─────────────────────────┐                  ┌──────────────────────┐
- │ 사용자 (agent.py REPL)  │ ── REQ|ASK|... ──┤  xv6 커널 (QEMU)     │
- │ 자연어 + :role 토글     │ ←── LLM_REQ ─────┤                      │
- └────────────┬────────────┘                  │  agent_dispatch_now  │
-              │ HTTPS                         │   ├─ ACL check       │
-              ▼                               │   ├─ cache_get       │
- ┌─────────────────────────┐                  │   └─ exec_cmd        │
- │  Upstage Solar Pro 3    │                  │                      │
- │  api.upstage.ai/v1      │                  │ CFS scheduler        │
- └─────────────────────────┘                  │ /cache.bin (디스크)  │
-                                              └──────────────────────┘
+ ┌─────────────────────────┐                  ┌──────────────────────────┐
+ │ 사용자 (agent.py REPL)  │ ── REQ|ASK|... ──┤  xv6 커널 (QEMU)         │
+ │ 자연어 + :role 토글     │ ←── LLM_REQ ─────┤                          │
+ └────────────┬────────────┘                  │  agent_dispatch_now      │
+              │ HTTPS                         │   ├─ meta? (ASK/         │
+              ▼                               │   │   LLM_RESP/CACHE_*)  │
+ ┌─────────────────────────┐                  │   │   → cache_get/set    │
+ │  Upstage Solar Pro 3    │                  │   └─ else → agentq       │
+ │  api.upstage.ai/v1      │                  │            ▼              │
+ └─────────────────────────┘                  │  ┌─────────────────────┐ │
+                                              │  │ jailed agentd       │ │
+                                              │  │ (chroot /agentbox)  │ │
+                                              │  │ agent_blocked:      │ │
+                                              │  │   exec/kill/mknod   │ │
+                                              │  └─────────────────────┘ │
+                                              │  CFS scheduler           │
+                                              │  /cache.bin (디스크)     │
+                                              └──────────────────────────┘
 ```
 
 자세한 설계·구현 디테일: [Implementation.md](Implementation.md)
@@ -105,9 +115,11 @@ python3 agent.py
 
 `agent[reader]>` 프롬프트에서 자연어 입력:
 - `hello world` — PRINT 액션으로 출력
-- `7번 죽여` — KILL 액션 (reader 는 거부됨)
-- `:role admin` 후 `7번 죽여` — ACL 통과
-- `/test.txt 에 hi 라고 써줘` — WRITE 액션 (reader 거부, writer/admin 통과)
+- `/test.txt 에 hi 라고 써줘` — WRITE 액션 (jail 내 `/agentbox` 에 기록)
+- `7번 죽여` — KILL 액션 → 커널 `agent_blocked()` 가 차단 (`exec`/`kill`/`mknod`
+  는 jail 안에서 거부)
+- `:role admin` 토글은 wire 의 `agent:<role>` 접두어를 바꿔 진단 로깅에 영향
+  주지만, sandboxing 의 *실제 경계* 는 jail (chroot + syscall 가드)
 
 ### 방법 2 — 셸 모드 (자동 테스트 / 데모)
 
@@ -118,11 +130,15 @@ cd xv6-riscv && make qemu
 xv6 셸 (`$ `) 에서:
 
 ```bash
-$ cache_test           # 캐시 단위 테스트 (10/10 PASS)
-$ eval cache 10        # 캐시 hit-rate 측정
-$ eval acl 5           # ACL 거부율 측정 (100%)
+$ cache_test           # 캐시 단위 테스트 (13/13 PASS — exact + semantic)
+$ eval cache 10        # 캐시 hit-rate 측정 (exact)
+$ eval semantic 50     # MinHash + Jaccard paraphrase recall 측정
+$ eval acl 5           # (Sejoong 시제품) role-ACL 거부율 측정 — jail 통합 후
+                       # 의미가 약해졌으나 측정 도구는 유지
 $ eval fair 20         # CFS 공정성 측정 — prio=0 cohort ≈1.8× 더 많은 CPU
-$ agent_multi          # 4개 동시 에이전트, mixed role, ACL 차등 데모
+$ agent_multi          # 4개 동시 에이전트 dispatch 동시성 데모
+$ agentdemo            # jail 시연 (chroot + 위험 syscall 차단 4 케이스)
+$ write_race           # 4 writer 동시 write → inode sleeplock 직렬화 시각화
 ```
 
 ## 데모 (셸 모드 출력 예시)
@@ -136,7 +152,7 @@ $ agent_multi          # 4개 동시 에이전트, mixed role, ACL 차등 데모
   overall        : hits 5 / total 10 (50%)
 ```
 
-### `eval acl 3`
+### `eval acl 3` *(Sejoong 시제품 시점 출력 — jail 통합 후엔 jail 의 syscall 가드가 동일 효과를 더 깊은 단에서 제공)*
 
 ```
 === eval acl N=3 ===
@@ -159,7 +175,8 @@ $ agent_multi          # 4개 동시 에이전트, mixed role, ACL 차등 데모
 priority 0 cohort 가 priority 20 cohort 대비 약 **1.8 배의 CPU 점유** — CFS
 가 priority 를 vruntime 가중치로 반영함을 실증.
 
-### `agent_multi`
+### `agent_multi` *(Sejoong 시제품 시점 출력 — role-ACL 시연. jail 통합 후엔
+KILL/exec 가 `agent_blocked()` 에서 차단되며 role 은 진단용으로 남음)*
 
 ```
 === Multi-agent demo: 4 concurrent agents, mixed roles ===
@@ -190,11 +207,15 @@ OS_Project/
 ├── .env.example                     ← API 키 템플릿
 └── xv6-riscv/
     ├── kernel/
-    │   ├── agentcmd.c               ← 디스패처 + ACL + 8개 액션 핸들러
-    │   ├── cache.c                  ← LLM 응답 캐시 + 디스크 스왑
-    │   ├── proc.{c,h}               ← CFS 스케줄러
+    │   ├── agentcmd.c               ← 메타-디스패처 (ASK/LLM_RESP/CACHE_*) +
+    │   │                              일반 명령을 jailed agentd 큐로 forward
+    │   ├── cache.c                  ← LLM 응답 캐시 (exact + semantic) + 디스크 스왑
+    │   ├── fs.c                     ← jail 의 chroot 훅 (namex)
+    │   ├── proc.{c,h}               ← CFS 스케줄러 + jail_root / is_agent 필드
+    │   ├── syscall.c                ← agent_blocked: exec/kill/mknod 차단
     │   ├── console.c                ← REQ| 시리얼 감지
-    │   ├── sysproc.c                ← sys_set_cache/get_cache/dispatch
+    │   ├── sysproc.c                ← sys_jail / sys_agent_recv /
+    │   │                              sys_set_cache / sys_get_cache / sys_dispatch
     │   └── ...                      ← 기존 xv6 kernel
     └── user/
         ├── cache_test.c             ← 캐시 단위 테스트 (10/10 PASS)

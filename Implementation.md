@@ -4,17 +4,20 @@ xv6-riscv 위에서 LLM(Upstage Solar Pro)을 호스팅·지휘하는 **에이�
 Project_requirements.md §2 Direction A에 해당하며, AIOS 논문의 핵심 컴포넌트를
 간소화하여 xv6 커널에 직접 구현했다.
 
-| AIOS 컴포넌트          | 이 프로젝트 구현                                          |
-| ---------------------- | --------------------------------------------------------- |
-| Agent Scheduler        | **CFS 스케줄러** — `vruntime`+`priority` 가중 공정 분배   |
-| Tool Manager           | **커널 내부 명령어 디스패처** — 8개 액션, `REQ\|...` 파싱 |
-| Memory/Storage Manager | **LLM 응답 캐시** — RAM LRU + `/cache.bin` 디스크 스왑    |
-| Tool ACL Sandbox       | **역할(role) 기반 ACL** — reader/writer/admin 정적 정책   |
-| LLM Kernel Bridge      | **agent.py** — Solar API 프록시 (인터넷 호출만 대행)      |
+| AIOS 컴포넌트          | 이 프로젝트 구현                                                              |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| Agent Scheduler        | **CFS 스케줄러** — `vruntime`+`priority` 가중 공정 분배                       |
+| Tool Manager           | **커널 메타-디스패처 + jailed agentd** — 메타-명령은 in-kernel, 실행은 jail   |
+| Memory/Storage Manager | **LLM 응답 캐시 (의미 매칭)** — exact + MinHash/Jaccard, RAM LRU + 디스크 스왑 |
+| Tool Sandbox           | **Jail (chroot + syscall 가드)** — `init→fork→exec(agentd)→jail()`, 위험 syscall 차단 |
+| LLM Kernel Bridge      | **agent.py** — Solar API 프록시 (인터넷 호출만 대행)                          |
 
-> **설계 원칙**: 오케스트레이션(캐시 조회·LLM 호출 판단·캐시 저장·디스패치·ACL 검사)은
-> 전부 xv6 커널이 주관한다. `agent.py`는 의사결정을 하지 않으며, xv6가 물리적으로
-> 할 수 없는 일(인터넷 너머 Solar API 호출)만 대행하는 **얇은 프록시**다.
+> **설계 원칙**: 오케스트레이션(캐시 조회·LLM 호출 판단·캐시 저장)은 xv6 커널이
+> 메타-디스패처로 주관하고, 실제 명령 실행은 jail 안 `agentd` 가 담당. `agent.py`는
+> 의사결정을 하지 않으며, xv6가 물리적으로 할 수 없는 일(인터넷 너머 Solar API
+> 호출)만 대행하는 **얇은 프록시**다. 과거 단계의 *역할(role) 기반 ACL* 가드는
+> jail 통합으로 흡수됐고, 측정 도구(`eval acl`)와 `agent:<role>` wire 라벨은
+> 진단·시연용으로 남아 있다.
 >
 > 구현 완료 범위는 **Phase 1~5 전부** + **다중 에이전트 데모** + **평가지표 측정** (project.md
 > Direction A 의 "tool-use sandbox / file & shell tool permissions / multiple concurrent

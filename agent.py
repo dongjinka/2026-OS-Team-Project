@@ -1,17 +1,18 @@
-"""Python <-> xv6 LLM bridge — Solar 프록시 + 역할 기반 액션 번역.
+"""Python <-> xv6 LLM bridge — Solar 프록시 + 액션 번역.
 
 이 프로그램은 "OS for LLM" 설계 원칙에 따라 **의사결정을 전혀 하지 않는다**.
-오케스트레이션(캐시 조회, LLM 호출 판단, 캐시 저장, 디스패치)은 모두 xv6 커널이
-담당한다. 이 프로그램의 역할은 두 가지뿐이다:
+오케스트레이션(캐시 조회, LLM 호출 판단, 캐시 저장, 명령 dispatch)은 모두 xv6
+커널과 jail 안 `agentd` 가 담당한다. 이 프로그램의 역할은 두 가지뿐이다:
 
   1. 사용자 입력 + 현재 역할(role)을 `REQ|agent:<role>|ASK|<프롬프트>` 로 중계
   2. 커널이 `LLM_REQ|<프롬프트>` 를 보내올 때만 Solar API를 호출하고,
      번역한 와이어 명령을 `REQ|LLM_RESP|<CMD>|<arg>` 로 돌려줌
      (xv6 커널은 인터넷이 없으므로 이 한 가지만 호스트가 대신한다)
 
-역할(role) 은 클라이언트가 자유로이 토글하지만 **신뢰 경계는 LLM 출력**이지
-사용자 본인이 아니다. ACL은 커널이 강제하므로 reader 가 KILL을 시도하면 커널이
-`[deny]` 로 거절한다.
+역할(role) 은 클라이언트가 자유로이 토글하며 wire 의 진단 라벨로 남지만,
+**sandboxing 의 실제 경계는 jail** 이다 — `init → fork → exec(agentd) →
+jail("/agentbox")` 로 jailed agent 프로세스가 chroot 안에 갇히고, 위험한
+syscall (`exec`/`kill`/`mknod`) 은 커널 `agent_blocked()` 가 거부한다.
 
 Modes:
   * Mock (UPSTAGE_API_KEY 미설정): 네트워크 호출 없이 규칙 기반 응답
