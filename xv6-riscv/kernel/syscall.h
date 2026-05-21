@@ -24,3 +24,5 @@
 #define SYS_getpriority 23
 #define SYS_jail   24
 #define SYS_agent_recv 25
+#define SYS_set_deny 26
+#define SYS_get_deny 27

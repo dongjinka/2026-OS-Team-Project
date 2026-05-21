@@ -14,7 +14,23 @@
 
 ## [Unreleased]
 
-(작업 중인 변경은 여기 누적)
+### Added
+- F7 명령 거부 목록을 **설정 가능**하게 전환. 기존 하드코딩
+  `{KILL, EXEC}`을 커널 RAM의 가변 목록(스핀락 보호)으로 바꾸고, 신규
+  syscall `set_deny`/`get_deny`(번호 26·27)와 셸 도구 `user/denyctl.c`로
+  관리. `kernel/deny.h` 신규(op 상수 공유).
+  - **일회성**: `denyctl add/rm/reset` (이번 세션 RAM만)
+  - **영구**: `denyctl save` → `/denylist.conf`; `init`이 부팅 시
+    `denyctl load`로 자동 적용 → 재부팅 생존
+  - **권한**: `set_deny`는 `is_agent` 프로세스를 거부 → 격리 agent가
+    자기 샌드박스를 약화 불가 (사람 전용)
+- 단일 소스 설계: 커널 거부 목록 하나가 하드 경계 명령(KILL/EXEC)과
+  agentd 도구(WRITE/PRINT/…) 양쪽을 통제. agentd `LIST`는 커널 목록을
+  조회해 실효 정책(`DENY(kernel)`)을 표시.
+
+### Changed
+- `Makefile` UPROGS에 `_denyctl` 등록.
+- `user/init.c`: 부팅 시 `denyctl load` 1회 실행(agentd 기동 전).
 
 ---
 

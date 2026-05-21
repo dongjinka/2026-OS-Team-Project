@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "deny.h"
 
 extern struct proc proc[NPROC];
 
@@ -175,6 +176,58 @@ sys_agent_recv(void)
   if(n < 0)
     return -1;
   if(copyout(p->pagetable, uaddr, kbuf, n + 1) < 0)
+    return -1;
+  return n;
+}
+
+// set_deny(op, cmd): mutate the F7 command deny list. Only non-agent (human-
+// side) processes may call it, so a sandboxed agent cannot weaken its own
+// boundary. op is DENY_ADD/DENY_REMOVE/DENY_RESET (kernel/deny.h).
+uint64
+sys_set_deny(void)
+{
+  int op;
+  char cmd[DENY_NAMELEN];
+
+  if(myproc()->is_agent)    // a jailed agent must not edit the deny list
+    return -1;
+
+  argint(0, &op);
+  if(op == DENY_RESET){
+    deny_reset();
+    return 0;
+  }
+  if(op == DENY_CLEAR){
+    deny_clear();
+    return 0;
+  }
+  if(argstr(1, cmd, DENY_NAMELEN) < 0)
+    return -1;
+  if(op == DENY_ADD)
+    return deny_add(cmd);
+  if(op == DENY_REMOVE)
+    return deny_remove(cmd);
+  return -1;
+}
+
+// get_deny(buf, max): copy the deny list into buf as newline-separated names.
+// Readable by anyone (no mutation), so agentd can render effective policy.
+uint64
+sys_get_deny(void)
+{
+  uint64 uaddr;
+  int max;
+  char kbuf[DENY_MAX * DENY_NAMELEN];
+
+  argaddr(0, &uaddr);
+  argint(1, &max);
+  if(max <= 0)
+    return -1;
+  if(max > (int)sizeof(kbuf))
+    max = sizeof(kbuf);
+
+  int n = deny_snapshot(kbuf, max);
+  if(copyout(myproc()->pagetable, uaddr, kbuf, n + 1) < 0)
     return -1;
   return n;
 }

@@ -19,6 +19,7 @@
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
 #include "user/user.h"
+#include "kernel/deny.h"
 
 #define JAIL "/agentbox"
 
@@ -158,15 +159,38 @@ do_nice(char *arg)
     printf("[agentd] pid=%d prio=%d\n", pid, prio);
 }
 
-// LIST — report the agent's whitelist (F7) and per-function priority (F8)
+// True if name appears in the kernel deny-list snapshot (newline-separated).
+static int
+in_snapshot(const char *snap, const char *name)
+{
+  for(const char *s = snap; *s; ){
+    const char *n = name, *t = s;
+    while(*n && *t != '\n' && *t && *n == *t){ n++; t++; }
+    if(*n == 0 && (*t == '\n' || *t == 0))
+      return 1;
+    while(*s && *s != '\n') s++;     // advance to the next line
+    if(*s == '\n') s++;
+  }
+  return 0;
+}
+
+// LIST — report the agent's whitelist (F7) and per-function priority (F8).
+// Access reflects EFFECTIVE policy: a tool the human added to the kernel deny
+// list (via denyctl) shows DENY(kernel) — it never reaches this process.
 static void
 do_list(char *arg)
 {
+  char snap[DENY_MAX * DENY_NAMELEN];
+  int n = get_deny(snap, sizeof(snap));
+  if(n < 0) n = 0;
+  snap[n] = 0;
+
   printf("[agentd] agent functions (name | access | priority):\n");
-  for(int i = 0; i < NFN; i++)
-    printf("[agentd]   %s\t%s\tprio=%d\n",
-           table[i].name, table[i].allowed ? "ALLOW" : "DENY",
-           table[i].priority);
+  for(int i = 0; i < NFN; i++){
+    const char *acc = in_snapshot(snap, table[i].name) ? "DENY(kernel)"
+                      : (table[i].allowed ? "ALLOW" : "DENY");
+    printf("[agentd]   %s\t%s\tprio=%d\n", table[i].name, acc, table[i].priority);
+  }
 }
 
 // SETPRIO <FN>:<prio> — F8: the LLM retunes a function's priority

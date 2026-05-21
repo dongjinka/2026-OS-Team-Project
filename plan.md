@@ -88,8 +88,14 @@ F2 · F3 · F4 · F7 · F8 + `agent.py` 자율 에이전트 루프를 구현했�
 
 **(a) 커널 측 — 명령 큐 + 거부 목록** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)):
 - `agent_dispatch()`는 콘솔 인터럽트 컨텍스트에서 동작 → fork·파일 작업 불가.
-  실행하지 않고, **거부 목록**(`KILL`/`EXEC`)만 즉시 차단한 뒤 나머지 `REQ|`
-  라인을 커널 링버퍼(`agentq`)에 적재.
+  실행하지 않고, **거부 목록**(기본 `KILL`/`EXEC`)만 즉시 차단한 뒤 나머지
+  `REQ|` 라인을 커널 링버퍼(`agentq`)에 적재.
+- **거부 목록은 설정 가능** (하드코딩 아님): 스핀락으로 보호되는 커널 RAM
+  목록 + `set_deny`/`get_deny` syscall + 셸 도구 `denyctl`. 일회성(RAM) ·
+  영구(`/denylist.conf`, 부팅 시 `init`이 `denyctl load`로 자동 적용) ·
+  기본 복귀(`reset`) 지원. `set_deny`는 `is_agent` 프로세스를 거부 → 사람만
+  변경 가능. 커널 목록 하나가 하드 경계 명령과 agentd 도구를 모두 통제하며,
+  agentd `LIST`가 실효 정책을 표시.
 - 신규 `agent_recv()` 시스템 콜([sysproc.c](xv6-riscv/kernel/sysproc.c))로
   격리 프로세스만 큐를 비울 수 있음 (`is_agent`만 호출 가능).
 
@@ -166,7 +172,12 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 | `kernel/defs.h` | `cfs_vdelta`·`agentcmd_init`·`agentq_get` 프로토타입 |
 | `user/init.c` | `agentd` 자동 기동 추가 |
 | `user/{user.h,usys.pl}` | `jail()`·`agent_recv()` 스텁 |
-| `user/agentd.c` | **신규** — 격리 에이전트 런타임 (도구 테이블·LS 포함) |
+| `user/agentd.c` | **신규** — 격리 에이전트 런타임 (도구 테이블·LS 포함); `LIST`가 커널 거부 목록 반영 |
+| `kernel/deny.h` | **신규** — 거부 목록 op 상수(커널·user 공유) |
+| `kernel/agentcmd.c` | 거부 목록을 가변·스핀락 구조로 + `deny_add/remove/reset/clear/snapshot` |
+| `kernel/sysproc.c` | `sys_set_deny`·`sys_get_deny` 신규(사람 전용 가드) |
+| `user/denyctl.c` | **신규** — 거부 목록 관리 셸 도구 |
+| `user/init.c` | 부팅 시 `denyctl load` 1회 추가 |
 | `user/agentdemo.c` | **신규** — F2·F7 데모 프로그램 |
 | `mkfs/mkfs.c` | **신규(복원)** — `.gitignore`가 `mkfs/`를 통째 제외해 누락 |
 | `agent.py` | 단발 번역기 → 자율 에이전트 루프, `.env` 로더, 출력 동기화 |

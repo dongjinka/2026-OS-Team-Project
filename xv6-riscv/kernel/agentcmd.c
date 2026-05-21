@@ -24,6 +24,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "deny.h"
 
 #define AGENTQ_N    16     // ring buffer capacity (commands)
 #define AGENTQ_LEN  256    // max length of one command line
@@ -36,26 +37,121 @@ struct {
   int count;      // queued commands
 } agentq;
 
+// Commands the kernel refuses outright: they never reach the agent runtime
+// (F7 — the hard sandbox boundary). No longer hardcoded — managed at runtime
+// via set_deny()/get_deny() and the `denyctl` shell tool. Guarded by a
+// spinlock so deny_listed() can read it from interrupt context (agent_dispatch)
+// while denyctl mutates it from process context.
+struct {
+  struct spinlock lock;
+  char names[DENY_MAX][DENY_NAMELEN];
+  int count;
+} denylist;
+
+static const char *deny_default[] = { "KILL", "EXEC" };
+#define NDENY_DEFAULT ((int)(sizeof(deny_default) / sizeof(deny_default[0])))
+
+// Restore the built-in default deny list. Also used at boot.
+void
+deny_reset(void)
+{
+  acquire(&denylist.lock);
+  denylist.count = 0;
+  for(int i = 0; i < NDENY_DEFAULT && i < DENY_MAX; i++)
+    safestrcpy(denylist.names[denylist.count++], deny_default[i], DENY_NAMELEN);
+  release(&denylist.lock);
+}
+
+// Empty the deny list (nothing blocked at the kernel boundary).
+void
+deny_clear(void)
+{
+  acquire(&denylist.lock);
+  denylist.count = 0;
+  release(&denylist.lock);
+}
+
+// Add cmd to the deny list. Idempotent. Returns 0 on success, -1 if full.
+int
+deny_add(const char *cmd)
+{
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      release(&denylist.lock);
+      return 0;
+    }
+  }
+  if(denylist.count >= DENY_MAX){
+    release(&denylist.lock);
+    return -1;
+  }
+  safestrcpy(denylist.names[denylist.count++], cmd, DENY_NAMELEN);
+  release(&denylist.lock);
+  return 0;
+}
+
+// Remove cmd from the deny list. Returns 0 if removed, -1 if not present.
+int
+deny_remove(const char *cmd)
+{
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      for(int j = i; j < denylist.count - 1; j++)
+        safestrcpy(denylist.names[j], denylist.names[j + 1], DENY_NAMELEN);
+      denylist.count--;
+      release(&denylist.lock);
+      return 0;
+    }
+  }
+  release(&denylist.lock);
+  return -1;
+}
+
+// Copy the deny list into buf as newline-separated names. Returns byte length.
+int
+deny_snapshot(char *buf, int max)
+{
+  int n = 0;
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    const char *s = denylist.names[i];
+    while(*s && n < max - 2)
+      buf[n++] = *s++;
+    if(n < max - 1)
+      buf[n++] = '\n';
+  }
+  release(&denylist.lock);
+  if(n < max)
+    buf[n] = 0;
+  return n;
+}
+
 void
 agentcmd_init(void)
 {
   initlock(&agentq.lock, "agentq");
   agentq.r = agentq.w = agentq.count = 0;
+  initlock(&denylist.lock, "denylist");
+  deny_reset();
 }
 
-// Commands the kernel refuses outright: they never reach the agent
-// runtime at all (F7 — the hard sandbox boundary).
+// True if cmd is on the deny list. Runs in interrupt context (agent_dispatch);
+// a spinlock is interrupt-safe (no sleep).
 static int
 deny_listed(const char *cmd)
 {
-  static const char *denied[] = { "KILL", "EXEC" };
-  for(int i = 0; i < 2; i++){
-    const char *d = denied[i], *c = cmd;
-    while(*c && *d && *c == *d){ c++; d++; }
-    if(*c == 0 && *d == 0)
-      return 1;
+  int found = 0;
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      found = 1;
+      break;
+    }
   }
-  return 0;
+  release(&denylist.lock);
+  return found;
 }
 
 // Called from consoleintr() for each complete "REQ|" line. Interrupt

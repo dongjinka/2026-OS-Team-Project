@@ -205,8 +205,28 @@ p->vruntime = (base > CFS_WAKEUP_BONUS) ? base - CFS_WAKEUP_BONUS : 0;
 `consoleintr()`가 `REQ|`로 시작하는 라인을 가로채 `agent_dispatch()`로 넘긴다.
 **인터럽트 컨텍스트라 fork·파일 작업 불가** → 여기서는 실행하지 않고:
 
-1. **거부 목록**(`KILL`, `EXEC`)이면 즉시 차단 ([agentcmd.c:48-58](xv6-riscv/kernel/agentcmd.c)).
-2. 나머지는 16-슬롯 링버퍼 `agentq`에 적재 ([agentcmd.c:87-102](xv6-riscv/kernel/agentcmd.c)).
+1. **거부 목록**에 있으면 즉시 차단 (기본값 `KILL`, `EXEC`).
+2. 나머지는 16-슬롯 링버퍼 `agentq`에 적재 ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)).
+
+**거부 목록은 설정 가능** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c),
+[deny.h](xv6-riscv/kernel/deny.h)). 더 이상 하드코딩이 아니라 스핀락으로
+보호되는 커널 RAM 목록이며 — `deny_listed()`가 인터럽트 컨텍스트에서 락 잡고
+읽고, 프로세스 컨텍스트가 `set_deny()`로 변경한다. 셸 도구 `denyctl`로 관리:
+
+| 명령 | 효과 | 지속성 |
+|------|------|--------|
+| `denyctl list` | 현재 목록 출력 | — |
+| `denyctl add/rm <CMD>` | 추가/제거 | 일회성(RAM) |
+| `denyctl reset` | 기본값 `{KILL,EXEC}` 복귀 | 일회성(RAM) |
+| `denyctl save` | `/denylist.conf`에 저장 | 영구 |
+| `denyctl load` | 파일 → 커널 적용 (부팅 시 init이 자동 실행) | — |
+
+신규 syscall `set_deny(op,cmd)`/`get_deny(buf,max)`(번호 26·27). `set_deny`는
+`is_agent` 프로세스를 거부 → **사람만** 변경 가능, 격리 agent는 자기 경계를
+약화시킬 수 없음 (음수 priority 권한 가드와 동일 철학, §1.3). 이 커널 목록
+하나가 하드 경계 명령과 agentd 도구 양쪽을 통제하므로 `WRITE` 같은 도구도
+거부 목록에 넣으면 agentd에 도달조차 못 한다. agentd `LIST`는 `get_deny`로
+실효 정책을 표시한다(`DENY(kernel)`).
 
 `agentq_get()`이 슬립락으로 dequeue를 제공하지만, **호출 가능한 주체는 신규
 syscall `sys_agent_recv`뿐이고 이 syscall은 `is_agent=1` 프로세스만 받는다**
@@ -367,6 +387,9 @@ python3 agent.py
 | agent의 `exec`/`kill`/`mknod`     | ✅ −1 반환                    |
 | 음수 priority 권한 가드           | ✅ user → 음수 거부됨         |
 | `REQ\|KILL\|...` (커널 거부)      | ✅ DENY 메시지, queue 미진입  |
+| `denyctl add WRITE` → `REQ\|WRITE\|` | ✅ 일회성 추가 후 커널 차단(agentd 미도달) |
+| `denyctl save` → 재부팅 → `list`  | ✅ `/denylist.conf` 자동 로드, 항목 생존 |
+| `denyctl reset` / `rm KILL`       | ✅ 기본 복귀 / 일회성 해제 동작 |
 | 실 Solar API ReAct 멀티스텝       | ✅ ls→read×N→summary 시나리오 |
 | 대화 메모리                       | ✅ "CFS 언급한 파일이 뭐였지?" → 메모리 응답 |
 
@@ -416,14 +439,16 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 | [kernel/trap.c](xv6-riscv/kernel/trap.c)                                   | timer tick에서 `cfs_vdelta()` 사용 |
 | [kernel/fs.c](xv6-riscv/kernel/fs.c)                                       | `namex()` chroot jail 적용 |
 | [kernel/main.c](xv6-riscv/kernel/main.c)                                   | `agentcmd_init()` 호출 |
-| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv` 등록, agent 위험 syscall 차단 |
+| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny` 등록, agent 위험 syscall 차단 |
 | [kernel/sysfile.c](xv6-riscv/kernel/sysfile.c)                             | `sys_jail()` 신규 |
-| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()` 신규 |
-| [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | **신규** — 명령 큐 + 거부 목록 게이트 |
+| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()` 신규 |
+| [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | 명령 큐 + **설정 가능한** 거부 목록(가변·스핀락) + `deny_add/remove/reset/clear/snapshot` |
+| [kernel/deny.h](xv6-riscv/kernel/deny.h)                                   | **신규** — 거부 목록 op 상수(커널·user 공유) |
 | [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get` 프로토타입 |
-| [user/init.c](xv6-riscv/user/init.c)                                       | `agentd` 자동 기동 |
-| [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()` 스텁 |
-| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임 |
+| [user/init.c](xv6-riscv/user/init.c)                                       | `agentd` 자동 기동 + 부팅 시 `denyctl load` 1회 |
+| [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()`·`set_deny()`·`get_deny()` 스텁 |
+| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영 |
+| [user/denyctl.c](xv6-riscv/user/denyctl.c)                                 | **신규** — 거부 목록 관리 셸 도구(list/add/rm/reset/save/load) |
 | [user/agentdemo.c](xv6-riscv/user/agentdemo.c)                             | **신규** — F2·F7 데모 |
 | [user/cfs_share.c](xv6-riscv/user/cfs_share.c)                             | **신규** — CFS 점유율 정량 벤치 |
 | [mkfs/mkfs.c](xv6-riscv/mkfs/mkfs.c)                                       | **복원** — `.gitignore` 패턴 문제로 누락돼 있던 것 |

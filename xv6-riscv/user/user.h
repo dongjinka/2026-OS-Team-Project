@@ -28,6 +28,8 @@ int setpriority(int, int);
 int getpriority(int);
 int jail(const char*);
 int agent_recv(char*);
+int set_deny(int, const char*);
+int get_deny(char*, int);
 
 // ulib.c
 int stat(const char*, struct stat*);

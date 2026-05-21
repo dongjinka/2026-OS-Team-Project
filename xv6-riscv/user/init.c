@@ -23,6 +23,18 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+  // Apply any persisted F7 deny-list policy (/denylist.conf) to the kernel
+  // before starting the agent runtime, so a saved configuration takes effect
+  // at boot. denyctl load is a no-op if the file does not exist.
+  pid = fork();
+  if(pid == 0){
+    char *dargv[] = { "denyctl", "load", 0 };
+    exec("denyctl", dargv);
+    printf("init: exec denyctl failed\n");
+    exit(1);
+  }
+  wait((int *) 0);
+
   // Start the jailed LLM agent runtime. It confines itself via jail() and
   // then serves LLM-issued commands inside its sandbox for the system's
   // lifetime (it does not exit, so init's wait() loop never reaps it).
