@@ -3,16 +3,16 @@
  *
  * Spawns N children with different priorities, lets them all race a
  * fixed wall-clock budget, and reports each child's loop count plus the
- * implied CPU-share ratio. With Linux-style weights this lets us verify
- * F3/F4 numerically (not just by eye-balling finish order in Test 3).
+ * implied CPU-share ratio. This lets us verify F3/F4 numerically (not
+ * just by eye-balling finish order in Test 3).
  *
  * Recommended invocation: smp=1 (so cores don't trivially absorb every
  * runnable child). Try `make qemu CPUS=1` and run `cfs_share`.
  *
  * Output example:
- *   prio=  1 count=4123456 share=63%  weight=1277
- *   prio= 10 count=1320120 share=20%  weight= 110
- *   prio= 19 count= 991111 share=15%  weight=  15
+ *   prio=1 count=4123456 share=63%
+ *   prio=10 count=1320120 share=20%
+ *   prio=19 count=991111 share=15%
  */
 #include "kernel/types.h"
 #include "kernel/stat.h"
@@ -59,24 +59,8 @@ main(int argc, char *argv[])
           count++;
       }
 
-      /* Report back as "prio:count\n". Fixed-width text is enough — the
-       * parent just slurps the whole pipe. */
-      char buf[64];
-      int n = 0;
-      int v = prios[i];
-      char tmp[8]; int tn = 0;
-      if(v < 0){ buf[n++] = '-'; v = -v; }
-      if(v == 0) tmp[tn++] = '0';
-      while(v){ tmp[tn++] = '0' + v%10; v /= 10; }
-      while(tn--) buf[n++] = tmp[tn];
-      buf[n++] = ':';
-      uint c = count;
-      tn = 0;
-      if(c == 0) tmp[tn++] = '0';
-      while(c){ tmp[tn++] = '0' + c%10; c /= 10; }
-      while(tn--) buf[n++] = tmp[tn];
-      buf[n++] = '\n';
-      write(p[1], buf, n);
+      /* Report back as "prio:count\n"; the parent slurps the whole pipe. */
+      fprintf(p[1], "%d:%u\n", prios[i], count);
       exit(0);
     }
   }
@@ -84,7 +68,10 @@ main(int argc, char *argv[])
   close(p[1]);
 
   /* Wait for all children before reading so we can size the report by
-   * total iterations (for the share-% column). */
+   * total iterations (for the share-% column). This is only safe while
+   * NKIDS * max_line_bytes (~14) stays under PIPESIZE (512): otherwise a
+   * writer would block on a full pipe while we block in wait() -> deadlock.
+   * If you bump NKIDS past ~30, read concurrently with wait() instead. */
   for(int i = 0; i < NKIDS; i++){
     int st;
     wait(&st);
@@ -120,10 +107,13 @@ main(int argc, char *argv[])
     nrows++;
   }
 
+  if(nrows != NKIDS)
+    printf("cfs_share: warning: parsed %d of %d rows\n", nrows, NKIDS);
+
   printf("\ncfs_share results:\n");
   for(int i = 0; i < nrows; i++){
     int pct = total ? (int)((uint64)rows[i].count * 100 / total) : 0;
-    printf("  prio=%d count=%d share=%d%%\n",
+    printf("  prio=%d count=%u share=%d%%\n",
            rows[i].prio, rows[i].count, pct);
   }
   printf("  (total=%d iterations)\n", total);
