@@ -255,7 +255,7 @@ main(void)
 {
   // Ensure the jail directory exists, then confine ourselves to it.
   // (mkdir must happen before jail() — afterward '/' is the jail root.)
-  mkdir(JAIL);
+  mkdir(JAIL);     // -1 if it already exists from a previous boot — OK
   if(jail(JAIL) < 0){
     printf("[agentd] FATAL: jail(%s) failed\n", JAIL);
     exit(1);
