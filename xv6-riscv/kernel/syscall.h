@@ -29,3 +29,4 @@
 #define SYS_procinfo 28
 #define SYS_set_cache 29
 #define SYS_get_cache 30
+#define SYS_dispatch  31

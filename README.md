@@ -31,7 +31,7 @@ jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된
 | F7 | 샌드박싱 — chroot jail + `exec`/`kill`/`mknod` 차단 + 명령 화이트리스트 | ✅ |
 | F8 | LLM이 다루는 도구별 priority 커스터마이즈 (`SETPRIO` / `LIST`) | ✅ |
 | 보너스 | ReAct 자율 에이전트 루프 + 대화 메모리 | ✅ |
-| F9 | LLM 응답 캐시 | 🟡 커널 구현 완료 (cache.c · `set_cache`/`get_cache` · 테스트 통과) — `agent.py` 연동만 남음 |
+| F9 | LLM 응답 캐시 | ✅ (cache.c + 커널 `ASK` 오케스트레이션 + `agent.py :ask` 경로 — 히트 시 Solar 호출 생략) |
 | F10 | 유휴 시간대 LoRA 학습 | ❌ (범위 외 — Future Work) |
 
 ---
@@ -58,19 +58,19 @@ jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된
  │                                                              │
  │   사람 입력  ─► sh (셸)                                       │
  │                                                              │
- │   REQ| 라인 ─► consoleintr ─► agent_dispatch                 │
- │                                  │  거부 목록(KILL/EXEC) 즉시 차단
- │                                  ▼                           │
- │                              ┌────────┐                       │
- │                              │ agentq │  ← 커널 링버퍼        │
- │                              └────┬───┘                       │
- │                                   │ sys_agent_recv (is_agent only)
- │                                   ▼                           │
+ │   REQ| 라인 ─► consoleintr ─► agent_dispatch (인터럽트: intake 적재만)      │
+ │                                  │                                          │
+ │   agent_drain (프로세스 컨텍스트) ─► agent_dispatch_now: role 떼고 라우팅   │
+ │     ├─ ASK ─► F9 캐시 조회                                                  │
+ │     │         · 히트 → agentd로 응답 전달 (Solar 생략)                      │
+ │     │         · 미스 → 호스트에 LLM_REQ ─► (Solar) ─► LLM_RESP ─► cache_set │
+ │     └─ 그 외 ─► 거부 목록(KILL/EXEC) 검사 ─► agentq 적재                     │
+ │                                   │ sys_agent_recv (is_agent only)          │
+ │                                   ▼                                         │
  │   ┌──────────────────────────────────────────────────────┐   │
  │   │  agentd  (jailed: chroot=/agentbox, is_agent=1)       │   │
- │   │  ─────────────────────────────────────────────────    │   │
- │   │  도구 테이블(화이트리스트):                            │   │
- │   │    PRINT · READ · WRITE · LS · NICE · LIST · SETPRIO  │   │
+ │   │  도구(화이트리스트): PRINT · CHAT · READ · WRITE · LS │   │
+ │   │    · NICE · LIST · SETPRIO · PS · HELP                │   │
  │   │  각 도구 실행 전 setpriority(self, fn.priority)       │   │
  │   └────────────────────┬─────────────────────────────────┘   │
  │                        ▼                                     │
@@ -195,7 +195,9 @@ python3 agent.py
 
 기동 시 `[agent] mode = solar (solar-pro2)` 또는 `[agent] mode = mock` 로
 모드를 알린다. `you ▸` 프롬프트에 자연어로 요청하면 LLM이 ReAct 루프로
-계획·도구 호출·관찰을 반복한 뒤 답한다.
+계획·도구 호출·관찰을 반복한 뒤 답한다. 한 줄을 `:ask <프롬프트>`로 보내면
+대신 **커널 F9 캐시 경로**를 타며(히트 시 Solar 호출 생략), `:role <name>`으로
+요청에 역할 태그를 붙일 수 있다.
 
 실증된 시나리오 예:
 
@@ -204,6 +206,7 @@ you ▸ /agentbox 안에 plan.txt 라는 파일을 하나 만들어줘
 you ▸ 지금까지 만든 파일들 목록 보여줘
 you ▸ 그 파일들 내용을 요약해줘
 you ▸ 아까 CFS 얘기 나왔던 파일이 뭐였지?      # ← 대화 메모리에서 답변
+you ▸ :ask 오늘 날씨 어때?                      # ← 커널 캐시 경유(재요청 시 [cache] HIT)
 ```
 
 종료는 `Ctrl-D` 또는 `Ctrl-C`. xv6 측은 `make qemu-agent` 터미널에서
@@ -248,12 +251,13 @@ read/write 성공 후 `..`·외부 경로·음수 priority·`exec`·`kill` 차�
 - **F6 JSON 파싱 위치** — 현재는 호스트(`agent.py`)에서 파싱한다. 제안서
   원문은 "xv6 내부 구현"을 명시하므로 보고서에 설계 근거를 명시하거나
   `kernel/json.c` 미니 파서로 이식하는 옵션이 남아 있다 ([plan.md §5.1](plan.md)).
-- **F9 LLM 응답 캐시** — 커널 측 구현 완료. `kernel/cache.c`(16-슬롯 RAM +
-  `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭), 시스템콜
-  `set_cache`/`get_cache`(번호 29·30), `cache_test` 13/13 통과 (Se-Joong 원작
-  `c56b028`을 `76b2737`에서 이식). 남은 작업은 `agent.py`가 Solar 호출 전
-  `get_cache`로 조회해 히트 시 API 왕복을 생략하는 요청-경로 연동
-  ([plan.md §5.2](plan.md)).
+- **F9 LLM 응답 캐시 — 구현·연결 완료** (한계 아님, 기록용). `kernel/cache.c`
+  (16-슬롯 RAM + `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭, Se-Joong
+  원작 `c56b028`을 `76b2737`에서 이식) 위에, 커널 명령 경로의 `ASK` 메타 명령이
+  캐시를 조회한다: 히트면 `LLM_RESP` 없이 곧장 agentd로 응답을 전달하고, 미스면
+  호스트에 `LLM_REQ`를 보내 Solar를 1회 호출한 뒤 응답을 캐시에 적재한다. 호스트는
+  `agent.py`의 `:ask <프롬프트>`로 이 경로를 쓴다(기존 ReAct 루프는 기본 유지).
+  남은 여지: `:ask`를 기본 입력으로 승격할지(설계 선택, [plan.md §5.2](plan.md)).
 - **F10 유휴 시간대 LoRA 학습** — xv6(RISC-V, FP·디스크·메모리 극히 제한)에서
   실제 학습은 불가. 보고서 Future Work 로 분류, 필요 시 "유휴 tick 감지 →
   호스트 트리거 신호" 수준의 stub 가능.

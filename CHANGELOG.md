@@ -30,11 +30,23 @@
   `set_cache`/`get_cache`로 노출하되 번호는 **29/30**으로 재배정(SeungBeom의
   `set_deny`/`get_deny`/`procinfo` 26/27/28과 충돌 회피). `cacheinit()`를 `main.c`에
   추가하고 `create()`를 non-static으로 전환(cache.c가 `/cache.bin` 지연 생성에 사용).
-  - 미이식: `dispatch` syscall·`agent_multi`/`write_race`/`eval`은 SeungBeom에
-    없는 agentd 멀티에이전트(`REQ|agent:<role>|`) 라우팅에 의존하여 범위에서 제외.
   - 보안 하드닝: `sys_get_cache`의 copyout 길이를 `val_buf`(256B) 한도로 한정하고
     `disk_scan` 반환 vlen을 `CACHE_VAL`로 클램프 — 격리 agent가 심은 `/cache.bin`
     레코드의 위조 vlen(최대 0xFFFF)으로 커널 스택을 유저에 노출하던 경로 차단.
+- (SeungBeom) **F9 캐시를 명령 경로에 유기적으로 연결** — `76b2737`의 오케스트레이션을
+  SeungBeom 구조(설정형 deny 목록·PS/HELP)에 적응. `agentcmd.c`를 2단계로 분리:
+  `agent_dispatch`(인터럽트, enqueue) → `agent_drain`(프로세스 컨텍스트,
+  `usertrap`/`consoleread`) → `agent_dispatch_now`. 커널 메타 명령 `ASK`/`LLM_RESP`/
+  `CACHE_GET`/`CACHE_SET` 추가: `ASK`는 캐시 조회 → 히트면 agentd로 직접 전달(Solar
+  생략), 미스면 호스트에 `LLM_REQ` 발신 → `LLM_RESP` 수신 시 `cache_set` 후 전달.
+  - 신규 `dispatch` syscall(번호 31) + 이식 프로그램 `eval`/`agent_multi`/`write_race`
+    (Se-Joong 원작, `WRITE` 와이어를 SeungBeom `:` 구분자로 적응). agentd에 `CHAT` 핸들러.
+  - 호스트 `agent.py`: `:ask <프롬프트>`로 캐시 경로 사용(기본 ReAct 루프 유지);
+    `LLM_REQ` 수신 시 Solar 1회 호출 후 `LLM_RESP` 회신. 송신부 스레드 안전화 +
+    개행 정리.
+  - F7 deny 검사를 `agent_dispatch_now` forward 경로로 이동(경계 유지). 동시 `ASK`용
+    `pending_lock` 가드, 커널 스택 보호용 키 스냅샷 256B 상한, `agent_drain` 빈 큐
+    fast-path. `console` 입력 버퍼 256→2048(긴 `ASK` 수용).
 - (SeungBeom) **AI 자기관찰 명령어 셋** (`PS`·`HELP`) 추가 — LLM이 환경을 보고
   판단해 명령을 쓰도록 정보 명령 제공.
   - `PS` — 프로세스 목록(pid·state·priority·name, `[K]`/`[A]`). 신규 syscall
@@ -53,8 +65,8 @@
   - **권한**: `set_deny`는 `is_agent` 프로세스를 거부 → 격리 agent가 자기 샌드박스를 약화 불가 (사람 전용)
 
 ### Changed
-- (SeungBeom) `xv6-riscv/Makefile` UPROGS에 `_denyctl`·`_cache_test`, 커널 OBJS에
-  `cache.o` 등록.
+- (SeungBeom) `xv6-riscv/Makefile` UPROGS에 `_denyctl`·`_cache_test`·`_eval`·
+  `_agent_multi`·`_write_race`, 커널 OBJS에 `cache.o` 등록.
 - (SeungBeom) `xv6-riscv/user/init.c`: 부팅 시 `denyctl load` 1회 실행(agentd 기동 전).
 
 ### Fixed

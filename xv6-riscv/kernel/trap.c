@@ -93,6 +93,10 @@ usertrap(void)
     yield();
   }
 
+  // Drain the agent dispatcher queue in process context (cache handlers may
+  // begin_op()/sleep, which is illegal in the interrupt context that enqueued).
+  agent_drain();
+
   prepare_return();
 
   // the user page table to switch to, for trampoline.S

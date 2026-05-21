@@ -207,18 +207,26 @@ p->vruntime = (base > CFS_WAKEUP_BONUS) ? base - CFS_WAKEUP_BONUS : 0;
 "사람이 친 셸 명령은 그대로, **LLM이 만든 명령만 jail 안에서**"를 위해 실행
 경로 자체를 분리했다.
 
-### 3.1 (a) 콘솔 게이트 + 명령 큐 — [agentcmd.c](xv6-riscv/kernel/agentcmd.c)
+### 3.1 (a) 콘솔 게이트 + 2단계 명령 디스패치 — [agentcmd.c](xv6-riscv/kernel/agentcmd.c)
 
 `consoleintr()`가 `REQ|`로 시작하는 라인을 가로채 `agent_dispatch()`로 넘긴다.
-**인터럽트 컨텍스트라 fork·파일 작업 불가** → 여기서는 실행하지 않고:
+**인터럽트 컨텍스트라 fork·파일 작업·sleep 불가** → 실행하지 않고 intake 링버퍼에
+적재만 한다(stage 1). 실제 라우팅은 프로세스 컨텍스트에서 `agent_drain()`
+(`usertrap`/`consoleread`에서 호출)이 `agent_dispatch_now()`로 수행한다(stage 2).
+이 분리는 F9 캐시 핸들러가 `begin_op()`로 sleep할 수 있어 **필수**다.
 
-1. **거부 목록**에 있으면 즉시 차단 (기본값 `KILL`, `EXEC`).
-2. 나머지는 16-슬롯 링버퍼 `agentq`에 적재 ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)).
+`agent_dispatch_now()`는 선택적 `agent:<role>|` 접두어를 떼고:
+
+1. 메타 명령 `ASK`/`LLM_RESP`/`CACHE_GET`/`CACHE_SET`은 커널에서 처리한다
+   (F9 캐시 오케스트레이션 — §7.3).
+2. 그 외 명령은 **거부 목록**에 있으면 차단(기본값 `KILL`, `EXEC`), 통과분만
+   16-슬롯 링버퍼 `agentq`에 적재한다. 새 `dispatch` syscall(번호 31)도 같은
+   `agent_dispatch_now` 경로를 탄다.
 
 **거부 목록은 설정 가능** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c),
 [deny.h](xv6-riscv/kernel/deny.h)). 더 이상 하드코딩이 아니라 스핀락으로
-보호되는 커널 RAM 목록이며 — `deny_listed()`가 인터럽트 컨텍스트에서 락 잡고
-읽고, 프로세스 컨텍스트가 `set_deny()`로 변경한다. 셸 도구 `denyctl`로 관리:
+보호되는 커널 RAM 목록이며 — `deny_listed()`가 프로세스 컨텍스트(`dispatch_now`)
+에서 락 잡고 읽고, `set_deny()`로 변경한다. 셸 도구 `denyctl`로 관리:
 
 | 명령 | 효과 | 지속성 |
 |------|------|--------|
@@ -438,13 +446,19 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 제안서 §F6 원문은 "xv6 내부 JSON 역직렬화"를 명시하므로, 본 결정과 사유를
 기술 보고서에 함께 기재한다.
 
-### 7.3 캐시(F9) 현황 · 미구현(선택)
+### 7.3 캐시(F9) 연동 · 미구현(선택)
 
-- **F9 LLM 응답 캐시**: 커널 구현 완료 — `kernel/cache.c`(16-슬롯 RAM +
-  `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭), 시스템콜
-  `set_cache`/`get_cache`(번호 29·30), `user/cache_test.c` 13/13 통과.
-  Se-Joong 원작(`76b2737`)을 이식. 남은 작업은 `agent.py` 요청 경로 연동
-  (plan.md §5.2).
+- **F9 LLM 응답 캐시 — 구현·연결 완료**. `kernel/cache.c`(16-슬롯 RAM +
+  `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭, Se-Joong 원작
+  `76b2737` 이식, syscall `set_cache`/`get_cache` 29·30, `cache_test` 13/13)를
+  **명령 경로에 연결**: `agentcmd.c`가 2단계(인터럽트 `agent_dispatch` enqueue →
+  프로세스 컨텍스트 `agent_drain`→`agent_dispatch_now`)로 나뉘고, `ASK`/`LLM_RESP`/
+  `CACHE_GET`/`CACHE_SET` 메타 명령을 커널에서 처리한다. `ASK`는 캐시 조회 후
+  히트면 agentd로 직접 전달(Solar 생략), 미스면 호스트에 `LLM_REQ` 발신 → 호스트가
+  `LLM_RESP`로 응답하면 `cache_set` 후 전달. 새 `dispatch` syscall(번호 31)로
+  유저 프로그램(`eval`/`agent_multi`/`write_race`)도 이 경로를 구동한다. 호스트
+  `agent.py`는 `:ask`로 연결(기본 ReAct 루프 유지). deny 검사는 `dispatch_now`의
+  forward 경로로 이동해 F7 경계 유지.
 - **F10 LoRA 학습**: xv6 환경 제약상 범위 외.
 
 ---
@@ -455,24 +469,28 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 |----------------------------------------------------------------------------|------------|
 | [kernel/proc.h](xv6-riscv/kernel/proc.h)                                   | `is_agent`, `jail_root` 필드 |
 | [kernel/proc.c](xv6-riscv/kernel/proc.c)                                   | CFS 가중치 테이블·`cfs_vdelta`·`cfs_min`, fork·wakeup·scheduler·procdump 개편 |
-| [kernel/trap.c](xv6-riscv/kernel/trap.c)                                   | timer tick에서 `cfs_vdelta()` 사용 |
+| [kernel/trap.c](xv6-riscv/kernel/trap.c)                                   | timer tick에서 `cfs_vdelta()` 사용; `usertrap`에서 `agent_drain()` 호출 |
+| [kernel/console.c](xv6-riscv/kernel/console.c)                             | `consoleread`에서 `agent_drain()` 호출; 입력 버퍼 256→2048(긴 `ASK`) |
 | [kernel/fs.c](xv6-riscv/kernel/fs.c)                                       | `namex()` chroot jail 적용 |
 | [kernel/main.c](xv6-riscv/kernel/main.c)                                   | `agentcmd_init()`·`cacheinit()` 호출 |
-| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny`·`SYS_set_cache`·`SYS_get_cache` 등록, agent 위험 syscall 차단 |
+| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny`·`SYS_set_cache`·`SYS_get_cache`·`SYS_dispatch` 등록, agent 위험 syscall 차단 |
 | [kernel/sysfile.c](xv6-riscv/kernel/sysfile.c)                             | `sys_jail()` 신규; `create()`를 non-static 전환(cache.c용) |
-| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()`, `sys_procinfo()`, `sys_set_cache()`·`sys_get_cache()` 신규 |
-| [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | 명령 큐 + **설정 가능한** 거부 목록(가변·스핀락) + `deny_add/remove/reset/clear/snapshot` |
+| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()`, `sys_procinfo()`, `sys_set_cache()`·`sys_get_cache()`, `sys_dispatch()` 신규 |
+| [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | **2단계 디스패치**(인터럽트 `agent_dispatch` enqueue → 프로세스 `agent_drain`/`agent_dispatch_now`) + 캐시 메타 명령(`ASK`/`LLM_RESP`/`CACHE_GET/SET`) + **설정 가능한** 거부 목록(`deny_add/remove/reset/clear/snapshot`) |
 | [kernel/cache.c](xv6-riscv/kernel/cache.c)                                 | **신규(이식)** — F9 LLM 응답 캐시(RAM+디스크 오버레이·MinHash/Jaccard). Se-Joong 원작 `76b2737` 이식 + 보안 하드닝 |
 | [kernel/deny.h](xv6-riscv/kernel/deny.h)                                   | **신규** — 거부 목록 op 상수(커널·user 공유) |
 | [kernel/procinfo.h](xv6-riscv/kernel/procinfo.h)                           | **신규** — `procinfo` 구조체(프로세스 스냅샷, 커널·user 공유) |
-| [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get`·`cacheinit`/`cache_get`/`cache_set`·`create` 프로토타입 |
+| [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get`·`agent_drain`/`agent_dispatch_now`·`cacheinit`/`cache_get`/`cache_get_exact`/`cache_get_semantic`/`cache_set`·`create` 프로토타입 |
 | [user/init.c](xv6-riscv/user/init.c)                                       | `agentd` 자동 기동 + 부팅 시 `denyctl load` 1회 |
 | [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()`·`set_deny()`·`get_deny()`·`set_cache()`·`get_cache()` 스텁 |
-| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영; `PS`·`HELP` 자기관찰 명령 + usage |
+| [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영; `PS`·`HELP` 자기관찰 명령 + usage; `CHAT` 핸들러(캐시 응답 출력) |
 | [user/denyctl.c](xv6-riscv/user/denyctl.c)                                 | **신규** — 거부 목록 관리 셸 도구(list/add/rm/reset/save/load) |
 | [user/agentdemo.c](xv6-riscv/user/agentdemo.c)                             | **신규** — F2·F7 데모 |
 | [user/cfs_share.c](xv6-riscv/user/cfs_share.c)                             | **신규** — CFS 점유율 정량 벤치 |
 | [user/cache_test.c](xv6-riscv/user/cache_test.c)                           | **신규(이식)** — F9 캐시 단독 시연 테스트(13/13 통과). `76b2737` 이식 |
+| [user/eval.c](xv6-riscv/user/eval.c)                                       | **신규(이식)** — 캐시 히트율·ACL deny율 평가 하니스(`dispatch`/`get_cache`). `76b2737` 이식 |
+| [user/agent_multi.c](xv6-riscv/user/agent_multi.c)                         | **신규(이식)** — 4개 역할 동시 에이전트 데모(`dispatch`). `76b2737` 이식 + WRITE `:` 적응 |
+| [user/write_race.c](xv6-riscv/user/write_race.c)                           | **신규(이식)** — 동일 파일 동시 WRITE 직렬화 데모(`dispatch`). `76b2737` 이식 + WRITE `:` 적응 |
 | [mkfs/mkfs.c](xv6-riscv/mkfs/mkfs.c)                                       | **복원** — `.gitignore` 패턴 문제로 누락돼 있던 것 |
-| [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화; `ps`·`help` 도구 노출 |
-| [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd`·`_cache_test` UPROGS, `cache.o` 커널 OBJS 등록 |
+| [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화; `ps`·`help` 도구; `:ask`(커널 F9 캐시 경로) + `LLM_REQ` 응답 |
+| [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd`·`_cache_test`·`_eval`·`_agent_multi`·`_write_race` UPROGS, `cache.o` 커널 OBJS 등록 |

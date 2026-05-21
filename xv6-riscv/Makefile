@@ -149,6 +149,9 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_priority_test\
 	$U/_cache_test\
+	$U/_eval\
+	$U/_agent_multi\
+	$U/_write_race\
 	$U/_cfs_share\
 	$U/_denyctl\
 	$U/_agentdemo\

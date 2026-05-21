@@ -34,6 +34,7 @@ struct fn {
 
 static struct fn table[] = {
   { "PRINT",   1, 10, "PRINT|<msg>" },
+  { "CHAT",    1, 10, "CHAT|<msg>" },
   { "READ",    1,  8, "READ|<file>" },
   { "WRITE",   1, 12, "WRITE|<file>:<text>" },
   { "LS",      1,  8, "LS|" },
@@ -71,6 +72,14 @@ static void
 do_print(char *arg)
 {
   printf("[agentd] %s\n", arg);
+}
+
+// CHAT <text> — natural-language reply. The kernel forwards cache hits of
+// "CHAT|..." and the LLM's final answer (via LLM_RESP) through this path.
+static void
+do_chat(char *arg)
+{
+  printf("[chat] %s\n", arg);
 }
 
 // READ <path> — print a file's contents (path is chroot'd to the jail)
@@ -281,6 +290,7 @@ execute(char *line)
       setpriority(getpid(), table[i].priority);
 
       if(streq(cmd, "PRINT"))        do_print(arg);
+      else if(streq(cmd, "CHAT"))    do_chat(arg);
       else if(streq(cmd, "READ"))    do_read(arg);
       else if(streq(cmd, "WRITE"))   do_write(arg);
       else if(streq(cmd, "LS"))      do_ls(arg);

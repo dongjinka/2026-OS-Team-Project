@@ -51,3 +51,4 @@ entry("get_deny");
 entry("procinfo");
 entry("set_cache");
 entry("get_cache");
+entry("dispatch");

@@ -100,7 +100,9 @@ void            wakeup(void*);
 uint64          cfs_vdelta(int);
 
 // agentcmd.c
-void            agent_dispatch(char *);
+void            agent_dispatch(char *);       // interrupt-safe intake enqueue
+void            agent_drain(void);            // process-ctx: drain intake queue
+void            agent_dispatch_now(char *);   // process-ctx: route one wire line
 void            agentcmd_init(void);
 int             agentq_get(char *);
 int             deny_add(const char *);
@@ -112,6 +114,8 @@ int             deny_snapshot(char *, int);
 // cache.c
 void            cacheinit(void);
 int             cache_get(const char *key, int klen, char *valbuf, int vbuflen);
+int             cache_get_exact(const char *key, int klen, char *valbuf, int vbuflen);
+int             cache_get_semantic(const char *key, int klen, char *valbuf, int vbuflen, int *out_score);
 int             cache_set(const char *key, int klen, const char *val, int vlen);
 
 // sysfile.c

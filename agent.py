@@ -133,6 +133,17 @@ give the "answer". Keep going until you can answer; do not ask the user to
 run commands themselves. Answer in the user's language.
 """
 
+# Single-shot prompt used only by the kernel-mediated `:ask` cache path.
+# The kernel asks the host (LLM_REQ) only on a cache miss; the host returns
+# exactly ONE wire command, which the kernel caches under the user's prompt.
+TRANSLATE_PROMPT = """You translate ONE user request into ONE command for a
+sandboxed xv6 agent. Reply with EXACTLY ONE JSON object, nothing else:
+  {"tool":"<name>","args":{...}}        or
+  {"tool":"chat","args":{"msg":"<plain answer>"}}   for a conversational reply.
+Tools: ls | read{"file"} | write{"file","text"} | print{"msg"} | ps |
+       nice{"pid","priority"} | chat{"msg"}. No multi-step planning."""
+
+
 # tool name -> wire payload (the kernel adds nothing; agentd executes it)
 def wire_for(tool: str, args: dict):
     try:
@@ -140,6 +151,7 @@ def wire_for(tool: str, args: dict):
         if tool == "list":  return "LIST|"
         if tool == "ps":    return "PS|"
         if tool == "help":  return "HELP|"
+        if tool == "chat":  return f"CHAT|{args.get('msg','')}"
         if tool == "read":  return f"READ|{args['file']}"
         if tool == "write": return f"WRITE|{args['file']}:{args.get('text','')}"
         if tool == "print": return f"PRINT|{args.get('msg','')}"
@@ -186,6 +198,11 @@ class Agent:
         self.host, self.port = host, port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+        # serialises socket writes: the REPL thread and the LLM_REQ worker
+        # thread can both call _send(), and socket.sendall() is not atomic
+        # across threads.
+        self._send_lock = threading.Lock()
+
         # output capture (the reader thread fills capture_buf while capturing)
         self.cap_lock = threading.Lock()
         self.capturing = False
@@ -194,6 +211,10 @@ class Agent:
 
         # conversation memory — persists across REPL turns
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+        # role tag for the kernel-mediated `:ask` path (kernel ignores it today;
+        # kept on the wire for diagnostics). Toggle with `:role <name>`.
+        self.role = "user"
 
         self.api_key = os.environ.get("UPSTAGE_API_KEY")
         self.mock = self.api_key is None
@@ -229,7 +250,8 @@ class Agent:
 
     def _send(self, wire: str) -> None:
         try:
-            self.sock.sendall((wire + "\n").encode("utf-8"))
+            with self._send_lock:
+                self.sock.sendall((wire + "\n").encode("utf-8"))
         except OSError as e:
             warn(f"[bridge] send failed: {e}")
 
@@ -262,6 +284,13 @@ class Agent:
             pending += text
             while "\n" in pending:
                 ln, pending = pending.split("\n", 1)
+                # kernel cache miss on a `:ask`: it asks the host to call the
+                # LLM once. Handle off-thread so the reader keeps draining.
+                if ln.startswith("LLM_REQ|"):
+                    prompt = ln[len("LLM_REQ|"):]
+                    threading.Thread(target=self._handle_llm_req,
+                                     args=(prompt,), daemon=True).start()
+                    continue
                 self._show(ln, terminated=True)
 
     def _show(self, ln: str, terminated: bool) -> None:
@@ -356,6 +385,34 @@ class Agent:
         return {"thought": "(mock) print it", "tool": "print",
                 "args": {"msg": last[:120]}}
 
+    # ---------- kernel-mediated `:ask` cache path ----------
+
+    def _translate(self, prompt: str) -> str:
+        """Turn one user prompt into ONE wire command for the kernel to cache."""
+        if self.mock:
+            return f"CHAT|(mock) {prompt[:100]}"
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model, temperature=0,
+                messages=[{"role": "system", "content": TRANSLATE_PROMPT},
+                          {"role": "user", "content": prompt}])
+            obj = extract_json(resp.choices[0].message.content)
+        except Exception as e:                       # noqa: BLE001 - report any API error
+            return f"CHAT|(llm error: {e})"
+        if obj:
+            w = wire_for(obj.get("tool", ""), obj.get("args") or {})
+            if w:
+                return w
+        return "CHAT|(could not translate request)"
+
+    def _handle_llm_req(self, prompt: str) -> None:
+        info(f"[bridge] LLM_REQ ← cache miss; calling "
+             f"{'mock' if self.mock else 'solar'}")
+        # One wire command per line: collapse any newlines the LLM emitted so
+        # the embedded text can't split the LLM_RESP line on the kernel side.
+        wire = self._translate(prompt).replace("\n", " ").replace("\r", " ")
+        self._send(f"REQ|LLM_RESP|{wire}")
+
     # ---------- agent loop ----------
 
     def handle(self, user_input: str) -> None:
@@ -408,6 +465,8 @@ class Agent:
         info("  e.g.  'what files have I created?'")
         info("        'summarise everything written to files so far'")
         info("        'make a file plan.txt with three TODO items'")
+        info("  :ask <prompt>   one-shot via the kernel F9 cache (skips Solar on")
+        info("                  a repeat/paraphrase hit). :role <name> tags it.")
         info("-" * 64)
         while True:
             with _LOCK:
@@ -423,8 +482,20 @@ class Agent:
                     _cursor = "start"
                 break
             line = line.strip()
-            if line:
-                self.handle(line)
+            if not line:
+                continue
+            if line.startswith(":role "):
+                self.role = line[6:].strip() or self.role
+                info(f"[bridge] role = {self.role}")
+                continue
+            if line.startswith(":ask "):
+                prompt = line[5:].strip()
+                if prompt:
+                    # fire-and-forget: the kernel handles cache/LLM_REQ and the
+                    # reader thread prints the result (or drives _handle_llm_req).
+                    self._send(f"REQ|agent:{self.role}|ASK|{prompt}")
+                continue
+            self.handle(line)
 
 
 def main():

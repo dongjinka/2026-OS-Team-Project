@@ -341,3 +341,22 @@ sys_get_cache(void)
   if(n > 0 && copyout(p->pagetable, vbuf_addr, val_buf, n) < 0) return -1;
   return vlen;
 }
+
+// Feed the agent dispatcher directly from userspace — same wire format the
+// QEMU serial port accepts ("REQ|...\n" or "REQ|agent:<role>|...\n"). Runs in
+// process context, so it routes synchronously via agent_dispatch_now (cache
+// meta-commands + deny-checked forward to agentd). Used by eval/agent_multi/
+// write_race to drive the cache + jail demos without the serial bridge.
+#define MAX_DISPATCH_LEN 1024
+
+uint64
+sys_dispatch(void)
+{
+  uint64 addr;
+  argaddr(0, &addr);
+  char buf[MAX_DISPATCH_LEN];
+  struct proc *p = myproc();
+  if(copyinstr(p->pagetable, buf, addr, MAX_DISPATCH_LEN) < 0) return -1;
+  agent_dispatch_now(buf);
+  return 0;
+}

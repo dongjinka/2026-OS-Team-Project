@@ -34,6 +34,7 @@ int get_deny(char*, int);
 int procinfo(struct procinfo*, int);
 int set_cache(const char *key, int klen, const char *val, int vlen);
 int get_cache(const char *key, int klen, char *valbuf, int vbuflen);
+int dispatch(const char *line);
 
 // ulib.c
 int stat(const char*, struct stat*);
