@@ -27,3 +27,5 @@
 #define SYS_set_deny 26
 #define SYS_get_deny 27
 #define SYS_procinfo 28
+#define SYS_set_cache 29
+#define SYS_get_cache 30

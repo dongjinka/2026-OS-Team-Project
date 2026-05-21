@@ -438,10 +438,13 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 제안서 §F6 원문은 "xv6 내부 JSON 역직렬화"를 명시하므로, 본 결정과 사유를
 기술 보고서에 함께 기재한다.
 
-### 7.3 미구현 (선택)
+### 7.3 캐시(F9) 현황 · 미구현(선택)
 
-- **F9 LLM 응답 캐시**: 미구현. `kernel/cache.c` + LRU + `CACHE_GET/SET` 명령
-  으로 확장 가능 (plan.md §5.2).
+- **F9 LLM 응답 캐시**: 커널 구현 완료 — `kernel/cache.c`(16-슬롯 RAM +
+  `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭), 시스템콜
+  `set_cache`/`get_cache`(번호 29·30), `user/cache_test.c` 13/13 통과.
+  Se-Joong 원작(`76b2737`)을 이식. 남은 작업은 `agent.py` 요청 경로 연동
+  (plan.md §5.2).
 - **F10 LoRA 학습**: xv6 환경 제약상 범위 외.
 
 ---
@@ -454,20 +457,22 @@ JSON 파싱은 **호스트(`agent.py`)에서 수행**한다. 커널은 검증된
 | [kernel/proc.c](xv6-riscv/kernel/proc.c)                                   | CFS 가중치 테이블·`cfs_vdelta`·`cfs_min`, fork·wakeup·scheduler·procdump 개편 |
 | [kernel/trap.c](xv6-riscv/kernel/trap.c)                                   | timer tick에서 `cfs_vdelta()` 사용 |
 | [kernel/fs.c](xv6-riscv/kernel/fs.c)                                       | `namex()` chroot jail 적용 |
-| [kernel/main.c](xv6-riscv/kernel/main.c)                                   | `agentcmd_init()` 호출 |
-| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny` 등록, agent 위험 syscall 차단 |
-| [kernel/sysfile.c](xv6-riscv/kernel/sysfile.c)                             | `sys_jail()` 신규 |
-| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()`, `sys_procinfo()` 신규 |
+| [kernel/main.c](xv6-riscv/kernel/main.c)                                   | `agentcmd_init()`·`cacheinit()` 호출 |
+| [kernel/syscall.{c,h}](xv6-riscv/kernel/syscall.c)                         | `SYS_jail`·`SYS_agent_recv`·`SYS_set_deny`·`SYS_get_deny`·`SYS_set_cache`·`SYS_get_cache` 등록, agent 위험 syscall 차단 |
+| [kernel/sysfile.c](xv6-riscv/kernel/sysfile.c)                             | `sys_jail()` 신규; `create()`를 non-static 전환(cache.c용) |
+| [kernel/sysproc.c](xv6-riscv/kernel/sysproc.c)                             | `sys_setpriority` 음수 권한 가드, `sys_agent_recv()`, `sys_set_deny()`·`sys_get_deny()`, `sys_procinfo()`, `sys_set_cache()`·`sys_get_cache()` 신규 |
 | [kernel/agentcmd.c](xv6-riscv/kernel/agentcmd.c)                           | 명령 큐 + **설정 가능한** 거부 목록(가변·스핀락) + `deny_add/remove/reset/clear/snapshot` |
+| [kernel/cache.c](xv6-riscv/kernel/cache.c)                                 | **신규(이식)** — F9 LLM 응답 캐시(RAM+디스크 오버레이·MinHash/Jaccard). Se-Joong 원작 `76b2737` 이식 + 보안 하드닝 |
 | [kernel/deny.h](xv6-riscv/kernel/deny.h)                                   | **신규** — 거부 목록 op 상수(커널·user 공유) |
 | [kernel/procinfo.h](xv6-riscv/kernel/procinfo.h)                           | **신규** — `procinfo` 구조체(프로세스 스냅샷, 커널·user 공유) |
-| [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get` 프로토타입 |
+| [kernel/defs.h](xv6-riscv/kernel/defs.h)                                   | `cfs_vdelta`·`agentcmd_init`·`agentq_get`·`cacheinit`/`cache_get`/`cache_set`·`create` 프로토타입 |
 | [user/init.c](xv6-riscv/user/init.c)                                       | `agentd` 자동 기동 + 부팅 시 `denyctl load` 1회 |
-| [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()`·`set_deny()`·`get_deny()` 스텁 |
+| [user/user.h, usys.pl](xv6-riscv/user/user.h)                              | `jail()`·`agent_recv()`·`set_deny()`·`get_deny()`·`set_cache()`·`get_cache()` 스텁 |
 | [user/agentd.c](xv6-riscv/user/agentd.c)                                   | **신규** — 격리 에이전트 런타임; `LIST`가 커널 거부 목록 반영; `PS`·`HELP` 자기관찰 명령 + usage |
 | [user/denyctl.c](xv6-riscv/user/denyctl.c)                                 | **신규** — 거부 목록 관리 셸 도구(list/add/rm/reset/save/load) |
 | [user/agentdemo.c](xv6-riscv/user/agentdemo.c)                             | **신규** — F2·F7 데모 |
 | [user/cfs_share.c](xv6-riscv/user/cfs_share.c)                             | **신규** — CFS 점유율 정량 벤치 |
+| [user/cache_test.c](xv6-riscv/user/cache_test.c)                           | **신규(이식)** — F9 캐시 단독 시연 테스트(13/13 통과). `76b2737` 이식 |
 | [mkfs/mkfs.c](xv6-riscv/mkfs/mkfs.c)                                       | **복원** — `.gitignore` 패턴 문제로 누락돼 있던 것 |
 | [agent.py](agent.py)                                                       | 단발 → ReAct 루프, `.env` 로더, 출력 동기화; `ps`·`help` 도구 노출 |
-| [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd` UPROGS 등록 |
+| [Makefile](xv6-riscv/Makefile)                                             | `_agentdemo`·`_agentd`·`_cache_test` UPROGS, `cache.o` 커널 OBJS 등록 |

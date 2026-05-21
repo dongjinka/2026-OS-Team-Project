@@ -108,6 +108,14 @@ int             deny_remove(const char *);
 void            deny_reset(void);
 void            deny_clear(void);
 int             deny_snapshot(char *, int);
+
+// cache.c
+void            cacheinit(void);
+int             cache_get(const char *key, int klen, char *valbuf, int vbuflen);
+int             cache_set(const char *key, int klen, const char *val, int vlen);
+
+// sysfile.c
+struct inode*   create(char *path, short type, short major, short minor);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);

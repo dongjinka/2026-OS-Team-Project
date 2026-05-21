@@ -49,3 +49,5 @@ entry("agent_recv");
 entry("set_deny");
 entry("get_deny");
 entry("procinfo");
+entry("set_cache");
+entry("get_cache");

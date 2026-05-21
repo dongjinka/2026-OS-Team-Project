@@ -18,9 +18,23 @@
 
 ---
 
-## [2026-05-22] — AI 자기관찰 명령어 · 설정 가능한 거부 목록 · 보안 강화
+## [2026-05-22] — AI 자기관찰 명령어 · 설정 가능한 거부 목록 · 보안 강화 · LLM 캐시
 
 ### Added
+- (Se-Joong) **F9 — LLM 응답 캐시** 원작. `kernel/cache.c` — 16-슬롯 RAM 테이블 +
+  `/cache.bin` 디스크 오버레이(LRU evict→append, 디스크 hit 시 RAM promote) +
+  MinHash/Jaccard 의미 매칭, 단독 시연 테스트 `user/cache_test.c`. 커밋 `76b2737`
+  (PR #5, Sejoong 브랜치, 원본 `c56b028`)에서 작성.
+- (SeungBeom) 위 **F9 캐시를 SeungBeom 브랜치로 이식** — `76b2737`을 second parent로
+  갖는 머지 커밋으로 가져옴(브랜치 그래프에 pull처럼 기록). 신규 syscall
+  `set_cache`/`get_cache`로 노출하되 번호는 **29/30**으로 재배정(SeungBeom의
+  `set_deny`/`get_deny`/`procinfo` 26/27/28과 충돌 회피). `cacheinit()`를 `main.c`에
+  추가하고 `create()`를 non-static으로 전환(cache.c가 `/cache.bin` 지연 생성에 사용).
+  - 미이식: `dispatch` syscall·`agent_multi`/`write_race`/`eval`은 SeungBeom에
+    없는 agentd 멀티에이전트(`REQ|agent:<role>|`) 라우팅에 의존하여 범위에서 제외.
+  - 보안 하드닝: `sys_get_cache`의 copyout 길이를 `val_buf`(256B) 한도로 한정하고
+    `disk_scan` 반환 vlen을 `CACHE_VAL`로 클램프 — 격리 agent가 심은 `/cache.bin`
+    레코드의 위조 vlen(최대 0xFFFF)으로 커널 스택을 유저에 노출하던 경로 차단.
 - (SeungBeom) **AI 자기관찰 명령어 셋** (`PS`·`HELP`) 추가 — LLM이 환경을 보고
   판단해 명령을 쓰도록 정보 명령 제공.
   - `PS` — 프로세스 목록(pid·state·priority·name, `[K]`/`[A]`). 신규 syscall
@@ -39,7 +53,8 @@
   - **권한**: `set_deny`는 `is_agent` 프로세스를 거부 → 격리 agent가 자기 샌드박스를 약화 불가 (사람 전용)
 
 ### Changed
-- (SeungBeom) `xv6-riscv/Makefile` UPROGS에 `_denyctl` 등록.
+- (SeungBeom) `xv6-riscv/Makefile` UPROGS에 `_denyctl`·`_cache_test`, 커널 OBJS에
+  `cache.o` 등록.
 - (SeungBeom) `xv6-riscv/user/init.c`: 부팅 시 `denyctl load` 1회 실행(agentd 기동 전).
 
 ### Fixed

@@ -32,6 +32,8 @@ int agent_recv(char*);
 int set_deny(int, const char*);
 int get_deny(char*, int);
 int procinfo(struct procinfo*, int);
+int set_cache(const char *key, int klen, const char *val, int vlen);
+int get_cache(const char *key, int klen, char *valbuf, int vbuflen);
 
 // ulib.c
 int stat(const char*, struct stat*);

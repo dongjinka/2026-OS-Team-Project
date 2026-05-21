@@ -31,7 +31,7 @@ jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된
 | F7 | 샌드박싱 — chroot jail + `exec`/`kill`/`mknod` 차단 + 명령 화이트리스트 | ✅ |
 | F8 | LLM이 다루는 도구별 priority 커스터마이즈 (`SETPRIO` / `LIST`) | ✅ |
 | 보너스 | ReAct 자율 에이전트 루프 + 대화 메모리 | ✅ |
-| F9 | LLM 응답 캐시 | ❌ (확장 포인트 마련) |
+| F9 | LLM 응답 캐시 | 🟡 커널 구현 완료 (cache.c · `set_cache`/`get_cache` · 테스트 통과) — `agent.py` 연동만 남음 |
 | F10 | 유휴 시간대 LoRA 학습 | ❌ (범위 외 — Future Work) |
 
 ---
@@ -248,8 +248,12 @@ read/write 성공 후 `..`·외부 경로·음수 priority·`exec`·`kill` 차�
 - **F6 JSON 파싱 위치** — 현재는 호스트(`agent.py`)에서 파싱한다. 제안서
   원문은 "xv6 내부 구현"을 명시하므로 보고서에 설계 근거를 명시하거나
   `kernel/json.c` 미니 파서로 이식하는 옵션이 남아 있다 ([plan.md §5.1](plan.md)).
-- **F9 LLM 응답 캐시** — 미구현. 시스템콜 `sys_cache_{get,set}` + LRU 정적 배열로
-  확장할 수 있는 자리는 비워둠 ([plan.md §5.2](plan.md)).
+- **F9 LLM 응답 캐시** — 커널 측 구현 완료. `kernel/cache.c`(16-슬롯 RAM +
+  `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭), 시스템콜
+  `set_cache`/`get_cache`(번호 29·30), `cache_test` 13/13 통과 (Se-Joong 원작
+  `c56b028`을 `76b2737`에서 이식). 남은 작업은 `agent.py`가 Solar 호출 전
+  `get_cache`로 조회해 히트 시 API 왕복을 생략하는 요청-경로 연동
+  ([plan.md §5.2](plan.md)).
 - **F10 유휴 시간대 LoRA 학습** — xv6(RISC-V, FP·디스크·메모리 극히 제한)에서
   실제 학습은 불가. 보고서 Future Work 로 분류, 필요 시 "유휴 tick 감지 →
   호스트 트리거 신호" 수준의 stub 가능.

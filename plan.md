@@ -41,7 +41,7 @@
 | F7 샌드박싱 | ✅ 완료 | 함수 화이트리스트 + chroot jail + 위험 syscall 차단 |
 | F8 함수별 Priority | ✅ 완료 | `LIST`/`SETPRIO`, agentd가 함수별 priority 적용 |
 | (추가) 에이전트 루프 | ✅ 완료 | `agent.py` ReAct + 대화 메모리, agentd 라우팅 |
-| F9 응답 캐시 | ❌ 미구현 | §5.2 (여유 시) |
+| F9 응답 캐시 | 🟡 커널 구현 | cache.c · `set_cache`/`get_cache`(29·30) · cache_test 13/13; `agent.py` 연동 남음 §5.2 |
 | F10 LoRA 학습 | ❌ 범위 외 | Future Work (§6) |
 
 ---
@@ -183,6 +183,12 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 | `user/agentdemo.c` | **신규** — F2·F7 데모 프로그램 |
 | `mkfs/mkfs.c` | **신규(복원)** — `.gitignore`가 `mkfs/`를 통째 제외해 누락 |
 | `agent.py` | 단발 번역기 → 자율 에이전트 루프, `.env` 로더, 출력 동기화 |
+| `kernel/cache.c` | **신규(이식)** — F9 LLM 응답 캐시(RAM+디스크·MinHash/Jaccard). `76b2737` 이식 + 보안 하드닝 |
+| `kernel/sysproc.c` | `sys_set_cache`·`sys_get_cache` 신규(번호 29·30) |
+| `kernel/sysfile.c` | `create()` non-static 전환(cache.c가 `/cache.bin` 지연 생성) |
+| `kernel/main.c` | `cacheinit()` 호출 추가 |
+| `user/cache_test.c` | **신규(이식)** — F9 캐시 단독 테스트(13/13 통과) |
+| `Makefile` | `cache.o`·`_cache_test` 등록 |
 | `Makefile` | `_agentdemo`·`_agentd` UPROGS 등록 |
 | `plan.md` | **신규** — 본 문서 |
 
@@ -197,7 +203,7 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 | 샌드박싱 | 거부 명령(`KILL`/`EXEC`) 호출 시 100% DENY, 허용 명령 정상 동작 |
 | Jail 격리 | `..` 탈출·절대경로 접근·외부 파일 가시성 모두 차단되는지 |
 | 에이전트 루프 | 멀티스텝 작업의 도구 호출 횟수·성공률·대화 메모리 활용도 |
-| 캐시 (F9 구현 시) | 히트율, 히트 시 응답 지연 vs 미스 시(API 왕복) 지연 비교 |
+| 캐시 (F9, `agent.py` 연동 시) | 히트율, 히트 시 응답 지연 vs 미스 시(API 왕복) 지연 비교. 커널·`cache_test`는 구현 완료, 종단 측정은 연동 후 |
 
 ---
 
@@ -229,15 +235,22 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 의 "선택 작업"으로 표기하되, 보안·유지보수 비용 대비 학습적 가치 외 실익이
 없어 우선순위 최하.
 
-### 5.2 F9 — LLM 응답 캐시 (여유 시)
+### 5.2 F9 — LLM 응답 캐시 (커널 구현 완료 · agent.py 연동 남음)
 
-- `kernel/cache.c` 신설: 고정 크기 엔트리 배열 `{key[64], val[256], last_use}`,
-  LRU 교체. 동적 할당 없이 정적 배열.
-- 시스템 콜 `sys_cache_get`/`sys_cache_set` 또는 디스패처 명령
-  `CACHE_GET`/`CACHE_SET`.
-- `agent.py`는 LLM 호출 전 `CACHE_GET` 조회, 히트면 API 호출 생략 →
-  비용·지연 절감.
-- (확장) `fs.img` 파일 백킹으로 재부팅 후에도 캐시 유지 — 파일시스템 개념 시연.
+커널 측은 구현·검증 완료 (Se-Joong 원작 `c56b028`을 `76b2737`에서 이식):
+
+- `kernel/cache.c`: 16-슬롯 RAM 테이블 + `/cache.bin` 디스크 오버레이(full RAM에
+  set 시 LRU 슬롯을 디스크에 append, 디스크 hit 시 RAM으로 promote). 키는
+  FNV-1a 64-bit 해시로 압축 — 동적 할당 없는 정적 배열.
+- 시스템 콜 `set_cache`/`get_cache`(번호 29·30). `user/cache_test.c` 13/13 통과.
+- 의미 매칭: MinHash + Jaccard로 정확 매치 미스 시 paraphrase·어순변경·부분
+  치환을 탐지(임계 Jaccard 0.7).
+- `/cache.bin` 파일 백킹으로 재부팅 후에도 캐시 유지 — 파일시스템 개념 시연.
+
+남은 작업 (여유 시):
+
+- `agent.py`가 Solar 호출 전 `get_cache` 조회 → 히트 시 API 왕복 생략(비용·지연
+  절감). 현재 캐시는 커널·테스트에만 연결되어 LLM 요청 경로에는 미연동.
 
 ### 5.3 평가·벤치마크 강화 (✅ 완료)
 

@@ -29,6 +29,7 @@ main()
     iinit();         // inode table
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
+    cacheinit();     // LLM response cache (F9) — locks only; disk I/O is lazy
     userinit();      // first user process
     __sync_synchronize();
     started = 1;
