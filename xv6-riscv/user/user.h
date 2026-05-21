@@ -26,6 +26,8 @@ int pause(int);
 int uptime(void);
 int setpriority(int, int);
 int getpriority(int);
+int jail(const char*);
+int agent_recv(char*);
 int set_cache(const char *key, int klen, const char *val, int vlen);
 int get_cache(const char *key, int klen, char *valbuf, int vbuflen);
 int dispatch(const char *line);

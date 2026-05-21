@@ -97,12 +97,15 @@ void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             kwait(uint64);
 void            wakeup(void*);
+uint64          cfs_vdelta(int);
 
 // agentcmd.c
 void            agentinit(void);
 void            agent_dispatch(char *);       // interrupt-safe: enqueues only
 void            agent_dispatch_now(char *);   // process-context: actual dispatch
 void            agent_drain(void);            // dequeue + dispatch queued lines
+void            agentcmd_init(void);          // jailed agent runtime queue init
+int             agentq_get(char *);           // jailed agent: blocking dequeue
 
 // cache.c
 void            cacheinit(void);

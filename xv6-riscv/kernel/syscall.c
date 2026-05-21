@@ -103,6 +103,8 @@ extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_setpriority(void);
 extern uint64 sys_getpriority(void);
+extern uint64 sys_jail(void);
+extern uint64 sys_agent_recv(void);
 extern uint64 sys_set_cache(void);
 extern uint64 sys_get_cache(void);
 extern uint64 sys_dispatch(void);
@@ -133,10 +135,19 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_setpriority] sys_setpriority,
 [SYS_getpriority] sys_getpriority,
+[SYS_jail]    sys_jail,
+[SYS_agent_recv] sys_agent_recv,
 [SYS_set_cache] sys_set_cache,
 [SYS_get_cache] sys_get_cache,
 [SYS_dispatch]  sys_dispatch,
 };
+
+// F7: system calls a sandboxed agent process may not invoke.
+static int
+agent_blocked(int num)
+{
+  return num == SYS_exec || num == SYS_kill || num == SYS_mknod;
+}
 
 void
 syscall(void)
@@ -146,6 +157,13 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // F7 sandbox: a jailed agent process is refused dangerous syscalls.
+    if(p->is_agent && agent_blocked(num)){
+      printf("[sandbox] pid %d (%s): syscall %d blocked\n",
+             p->pid, p->name, num);
+      p->trapframe->a0 = -1;
+      return;
+    }
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();

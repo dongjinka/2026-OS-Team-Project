@@ -152,6 +152,9 @@ UPROGS=\
 	$U/_eval\
 	$U/_agent_multi\
 	$U/_write_race\
+	$U/_cfs_share\
+	$U/_agentdemo\
+	$U/_agentd\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
