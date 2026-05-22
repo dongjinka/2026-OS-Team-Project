@@ -14,8 +14,9 @@
 // 디스크 hit 시 RAM 으로 promote (RAM-only 인라인 — cache_set 재귀 없음).
 //
 // Semantic cache: 정확 매치(FNV-1a) 미스 시 MinHash signature 들의 Jaccard
-// 유사도로 paraphrase / 어순변경 / 부분 치환을 탐지. signature 는 RAM 슬롯에만
-// 저장 (디스크 record 포맷 무변경) — 디스크 swap-out 항목은 정확 매치만 가능.
+// 유사도로 재구성된 문장을 탐지. signature 는 키를 *단어* 단위로 쪼개 만든다
+// (소문자화 + stopword 제외) — 어순·대소문자·구두점·기능어에 둔감. signature 는
+// RAM 슬롯에만 저장 (디스크 record 포맷 무변경) — 디스크 항목은 정확 매치만 가능.
 
 #include "types.h"
 #include "riscv.h"
@@ -33,11 +34,12 @@
 #define DISK_MAX_BYTES (4 * 1024 * 1024)  // /cache.bin 상한 4 MB
 
 // MinHash + Jaccard 파라미터
-#define SIG_K                       64    // signature 차원
-#define SHINGLE_N                   3     // byte n-gram (UTF-8 한글 1글자=3B)
-#define SEMANTIC_MATCH_NUM          7     // 임계 정수비 7/10 → Jaccard 0.7
-#define SEMANTIC_MATCH_DEN          10
-#define MIN_SHINGLES_FOR_SEMANTIC   4     // 너무 짧으면 signature 안 만듦
+#define SIG_K                     64    // signature 차원
+#define WORD_MAX                  32    // 한 단어 최대 바이트 (초과분은 잘림)
+#define SEMANTIC_MATCH_NUM        2     // 임계 정수비 2/5 → Jaccard 0.40
+#define SEMANTIC_MATCH_DEN        5     // ↑ 올리면 정밀도↑(false hit↓), ↓ 내리면 재현율↑
+#define MIN_WORDS_FOR_SEMANTIC    3     // content 단어 3개 미만이면 signature 안 만듦
+                                        // (2-단어 signature 는 분산이 커 신뢰 불가)
 
 struct cache_entry {
   uint64 hash;                 // 0 = 빈 슬롯
@@ -101,26 +103,76 @@ fnv1a_64_pair(const char *s, int n, uint64 *h1, uint64 *h2)
   *h2 = (b == 0) ? 1 : b;
 }
 
-// out_sig[SIG_K] 에 MinHash signature 작성. 반환: shingle 개수 (0이면 너무 짧음).
+// 단어 바이트: 영숫자 또는 UTF-8 멀티바이트(>=0x80, 한글 등). 그 외(공백·
+// 구두점)는 단어 구분자 — 구두점이 자동 분리·제외되므로 "어때?" 와 "어때"
+// 가 같은 단어로 매칭된다.
+static int
+is_wordbyte(unsigned char c)
+{
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+         (c >= 'a' && c <= 'z') || (c >= 0x80);
+}
+
+// 의미 없는 고빈도 영어 기능어. "what is the X of Y" 처럼 골격만 공유하는
+// 무관한 두 프롬프트가 false hit 나는 것을 막는다 (한국어 조사는 어절에
+// 붙어 있어 별도 처리 안 함 — 어절 단위 매칭으로 충분).
+static const char *stopwords[] = {
+  "the", "a", "an", "is", "are", "was", "of", "to", "in", "on", "at",
+  "for", "and", "or", "what", "how", "why", "do", "does", "did",
+  "i", "you", "it", "this", "that", "me", "my", "please", "can",
+};
+#define NSTOP ((int)(sizeof(stopwords) / sizeof(stopwords[0])))
+
+// w[0..wl) (이미 소문자화됨) 가 stopword 목록에 있으면 1.
+static int
+is_stopword(const char *w, int wl)
+{
+  for(int i = 0; i < NSTOP; i++){
+    const char *s = stopwords[i];
+    int j = 0;
+    while(j < wl && s[j] && s[j] == w[j]) j++;
+    if(j == wl && s[j] == 0) return 1;
+  }
+  return 0;
+}
+
+// out_sig[SIG_K] 에 MinHash signature 작성 — shingle 단위는 *단어*.
+// 키를 공백·구두점 기준으로 단어로 쪼개고, ASCII 는 소문자화, stopword 는
+// 제외한 뒤 각 단어를 hash 해 MinHash 한다. 어순·대소문자·구두점·기능어에
+// 둔감해, 바이트 n-gram 보다 재구성된 문장을 훨씬 잘 매칭한다.
+// 반환: signature 에 반영된 content 단어 수 (0 이면 너무 짧아 매칭 안 함).
 static int
 build_signature(const char *key, int klen, uint64 out_sig[SIG_K])
 {
-  if(klen < SHINGLE_N) return 0;
-  int n_shingle = klen - SHINGLE_N + 1;
-  if(n_shingle < MIN_SHINGLES_FOR_SEMANTIC) return 0;
-
   for(int k = 0; k < SIG_K; k++) out_sig[k] = ~(uint64)0;
 
-  for(int i = 0; i < n_shingle; i++){
+  int n_word = 0;
+  int i = 0;
+  while(i < klen){
+    while(i < klen && !is_wordbyte((unsigned char)key[i])) i++;   // skip 구분자
+    if(i >= klen) break;
+
+    char w[WORD_MAX];
+    int wl = 0;
+    while(i < klen && is_wordbyte((unsigned char)key[i])){
+      char c = key[i++];
+      if(c >= 'A' && c <= 'Z') c += 32;     // ASCII 소문자화
+      if(wl < WORD_MAX) w[wl++] = c;        // WORD_MAX 초과분은 버림
+    }
+    if(is_stopword(w, wl)) continue;
+
+    n_word++;
     uint64 h1, h2;
-    fnv1a_64_pair(key + i, SHINGLE_N, &h1, &h2);
+    fnv1a_64_pair(w, wl, &h1, &h2);
     for(int k = 0; k < SIG_K; k++){
       uint64 g = h1 + (uint64)k * h2;
       if(g == 0) g = 1;
       if(g < out_sig[k]) out_sig[k] = g;
     }
   }
-  return n_shingle;
+
+  if(n_word < MIN_WORDS_FOR_SEMANTIC) return 0;
+  return n_word;
 }
 
 // 두 signature 동일 위치 일치 개수 = 추정 Jaccard × SIG_K
