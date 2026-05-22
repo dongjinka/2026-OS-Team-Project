@@ -9,6 +9,12 @@ and runs an autonomous *agent loop* on top of Upstage Solar:
       → the tool's OUTPUT is fed back to the model as an observation
       → repeat until the model produces an answer
 
+Before running that loop the bridge checks the kernel's F9 response cache
+(CACHE_GET): a repeated or paraphrased *knowledge* question is answered
+straight from the cache, skipping Solar entirely. Only answers that used
+no tools are cached — tool / multi-step answers depend on live system
+state (files, processes) and would go stale.
+
 The model keeps full conversation memory, so follow-up questions ("now
 summarize them") build on earlier steps.
 
@@ -209,6 +215,12 @@ class Agent:
         self.capture_buf = ""
         self._seq = 0
 
+        # kernel F9 cache RPC — the reader thread hands each "RESP|" line
+        # (a CACHE_GET / CACHE_SET reply) to whoever waits on _resp_event.
+        self._resp_lock = threading.Lock()
+        self._resp_event = threading.Event()
+        self._resp_line = None
+
         # conversation memory — persists across REPL turns
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -290,6 +302,12 @@ class Agent:
                     prompt = ln[len("LLM_REQ|"):]
                     threading.Thread(target=self._handle_llm_req,
                                      args=(prompt,), daemon=True).start()
+                    continue
+                # kernel F9 cache reply — hand it to the waiting _cache_rpc().
+                if ln.startswith("RESP|"):
+                    with self._resp_lock:
+                        self._resp_line = ln
+                    self._resp_event.set()
                     continue
                 self._show(ln, terminated=True)
 
@@ -413,10 +431,61 @@ class Agent:
         wire = self._translate(prompt).replace("\n", " ").replace("\r", " ")
         self._send(f"REQ|LLM_RESP|{wire}")
 
+    # ---------- option 2: whole-answer reuse via the kernel F9 cache ----------
+
+    def _cache_rpc(self, wire: str, timeout: float = 4.0):
+        """Send one CACHE_GET/CACHE_SET wire command; return its RESP| line."""
+        with self._resp_lock:
+            self._resp_line = None
+            self._resp_event.clear()
+        self._send(wire)
+        if not self._resp_event.wait(timeout):
+            return None
+        with self._resp_lock:
+            return self._resp_line
+
+    def _cache_lookup(self, question: str):
+        """Return a cached answer for `question`, or None on miss.
+
+        The kernel matches exactly (FNV-1a) and then semantically (MinHash /
+        Jaccard), so a paraphrase of an earlier question can still hit."""
+        key = question.replace("\n", " ").replace("\r", " ")
+        resp = self._cache_rpc("REQ|CACHE_GET|" + key)
+        if resp and resp.startswith("RESP|HIT|"):
+            return resp[len("RESP|HIT|"):].replace("\\n", "\n")
+        return None
+
+    def _cache_store(self, question: str, answer_text: str) -> None:
+        """Best-effort: store a no-tool answer so the next ask is a cache hit.
+
+        Skipped for very short questions — those are usually context-dependent
+        follow-ups ("summarise that") whose answer must not be reused later."""
+        key = question.replace("\n", " ").replace("\r", " ")
+        if len(key.split()) < 3:
+            return
+        # one wire line: collapse newlines so the value can't split the line.
+        val = answer_text.replace("\r", "").replace("\n", "\\n")
+        if len(val.encode("utf-8")) > 900:    # kernel slot is 1024 B — keep margin
+            return
+        klen = len(key.encode("utf-8"))
+        self._cache_rpc(f"REQ|CACHE_SET|{klen}:{key}{val}")
+
     # ---------- agent loop ----------
 
     def handle(self, user_input: str) -> None:
+        # option 2 — kernel F9 cache pre-check. A repeated or paraphrased
+        # question whose answer is cached skips Solar and the whole tool loop.
+        cached = self._cache_lookup(user_input)
+        if cached is not None:
+            info("[cache HIT] answer reused from kernel F9 cache (Solar not called)")
+            answer(cached)
+            self.messages.append({"role": "user", "content": user_input})
+            self.messages.append({"role": "assistant", "content": cached})
+            self._trim_history()
+            return
+
         self.messages.append({"role": "user", "content": user_input})
+        tools_used = 0
         for n in range(1, MAX_STEPS + 1):
             self._trim_history()
             reply = self._call_llm()
@@ -434,6 +503,11 @@ class Agent:
 
             if "answer" in reply:
                 answer(reply["answer"])
+                # option 2 — cache the answer ONLY if no tool ran: a tool /
+                # multi-step answer depends on live system state (files,
+                # processes) and would go stale. No tool ⇒ pure knowledge.
+                if tools_used == 0:
+                    self._cache_store(user_input, reply["answer"])
                 return
 
             tool = reply.get("tool")
@@ -446,6 +520,7 @@ class Agent:
                 continue
 
             step(n, tool, args)
+            tools_used += 1
             obs = self.run_tool(tool, args)
             self.messages.append({"role": "user",
                                    "content": f"OBSERVATION ({tool}):\n{obs}"})
@@ -462,6 +537,8 @@ class Agent:
         global _cursor
         info("  Ask in plain language — I plan, run sandbox tools, observe,")
         info("  and remember the conversation.   Ctrl-D / Ctrl-C to quit.")
+        info("  Repeated knowledge questions return from the kernel F9 cache")
+        info("  with no Solar call; tool-using questions always run fresh.")
         info("  e.g.  'what files have I created?'")
         info("        'summarise everything written to files so far'")
         info("        'make a file plan.txt with three TODO items'")
