@@ -18,6 +18,73 @@
 
 ---
 
+## [2026-05-22] — AI 자기관찰 명령어 · 설정 가능한 거부 목록 · 보안 강화 · LLM 캐시
+
+### Added
+- (Se-Joong) **F9 — LLM 응답 캐시** 원작. `kernel/cache.c` — 16-슬롯 RAM 테이블 +
+  `/cache.bin` 디스크 오버레이(LRU evict→append, 디스크 hit 시 RAM promote) +
+  MinHash/Jaccard 의미 매칭, 단독 시연 테스트 `user/cache_test.c`. 커밋 `76b2737`
+  (PR #5, Sejoong 브랜치, 원본 `c56b028`)에서 작성.
+- (SeungBeom) 위 **F9 캐시를 SeungBeom 브랜치로 이식** — `76b2737`을 second parent로
+  갖는 머지 커밋으로 가져옴(브랜치 그래프에 pull처럼 기록). 신규 syscall
+  `set_cache`/`get_cache`로 노출하되 번호는 **29/30**으로 재배정(SeungBeom의
+  `set_deny`/`get_deny`/`procinfo` 26/27/28과 충돌 회피). `cacheinit()`를 `main.c`에
+  추가하고 `create()`를 non-static으로 전환(cache.c가 `/cache.bin` 지연 생성에 사용).
+  - 보안 하드닝: `sys_get_cache`의 copyout 길이를 `val_buf`(256B) 한도로 한정하고
+    `disk_scan` 반환 vlen을 `CACHE_VAL`로 클램프 — 격리 agent가 심은 `/cache.bin`
+    레코드의 위조 vlen(최대 0xFFFF)으로 커널 스택을 유저에 노출하던 경로 차단.
+- (SeungBeom) **F9 캐시를 명령 경로에 유기적으로 연결** — `76b2737`의 오케스트레이션을
+  SeungBeom 구조(설정형 deny 목록·PS/HELP)에 적응. `agentcmd.c`를 2단계로 분리:
+  `agent_dispatch`(인터럽트, enqueue) → `agent_drain`(프로세스 컨텍스트,
+  `usertrap`/`consoleread`) → `agent_dispatch_now`. 커널 메타 명령 `ASK`/`LLM_RESP`/
+  `CACHE_GET`/`CACHE_SET` 추가: `ASK`는 캐시 조회 → 히트면 agentd로 직접 전달(Solar
+  생략), 미스면 호스트에 `LLM_REQ` 발신 → `LLM_RESP` 수신 시 `cache_set` 후 전달.
+  - 신규 `dispatch` syscall(번호 31) + 이식 프로그램 `eval`/`agent_multi`/`write_race`
+    (Se-Joong 원작, `WRITE` 와이어를 SeungBeom `:` 구분자로 적응). agentd에 `CHAT` 핸들러.
+  - 호스트 `agent.py`: `:ask <프롬프트>`로 캐시 경로 사용(기본 ReAct 루프 유지);
+    `LLM_REQ` 수신 시 Solar 1회 호출 후 `LLM_RESP` 회신. 송신부 스레드 안전화 +
+    개행 정리.
+  - F7 deny 검사를 `agent_dispatch_now` forward 경로로 이동(경계 유지). 동시 `ASK`용
+    `pending_lock` 가드, 커널 스택 보호용 키 스냅샷 256B 상한, `agent_drain` 빈 큐
+    fast-path. `console` 입력 버퍼 256→2048(긴 `ASK` 수용).
+- (SeungBeom) **AI 자기관찰 명령어 셋** (`PS`·`HELP`) 추가 — LLM이 환경을 보고
+  판단해 명령을 쓰도록 정보 명령 제공.
+  - `PS` — 프로세스 목록(pid·state·priority·name, `[K]`/`[A]`). 신규 syscall
+    `procinfo(buf,max)`(번호 28, `kernel/procinfo.h`)로 proc 스냅샷을 copyout →
+    `NICE`가 대상 pid를 알 수 있게 함(관찰→행동 루프).
+  - `HELP` — 인자 형식(usage) 포함 명령 카탈로그로 LLM이 호출법을 런타임 확인.
+  - agentd 도구 테이블에 `usage` 필드 추가, `agent.py`에 `ps`/`help` 도구 노출.
+- (SeungBeom) F7 명령 거부 목록을 **설정 가능**하게 전환 — 기존 하드코딩
+  `{KILL, EXEC}`을 스핀락 보호 커널 RAM 가변 목록으로 바꿔 사용자 입력처럼
+  변경 가능. 신규 syscall `set_deny`/`get_deny`(번호 26·27), 셸 도구
+  `user/denyctl.c`, 공유 헤더 `kernel/deny.h`. 커널 목록 하나가 하드 경계
+  명령(KILL/EXEC)과 agentd 도구를 모두 통제하고(단일 소스), agentd `LIST`가
+  실효 정책(`DENY(kernel)`)을 표시.
+  - **일회성**: `denyctl add/rm/reset` (이번 세션 RAM만)
+  - **영구**: `denyctl save` → `/denylist.conf`, `init`이 부팅 시 `denyctl load`로 자동 적용 → 재부팅 생존
+  - **권한**: `set_deny`는 `is_agent` 프로세스를 거부 → 격리 agent가 자기 샌드박스를 약화 불가 (사람 전용)
+
+### Changed
+- (SeungBeom) `xv6-riscv/Makefile` UPROGS에 `_denyctl`·`_cache_test`·`_eval`·
+  `_agent_multi`·`_write_race`, 커널 OBJS에 `cache.o` 등록.
+- (SeungBeom) `xv6-riscv/user/init.c`: 부팅 시 `denyctl load` 1회 실행(agentd 기동 전).
+
+### Fixed
+- (SeungBeom) `user/cfs_share.c` 정리 — 직접 만든 정수→문자열 변환을 `fprintf`로
+  대체해 10자리 `uint` count에서 발생하던 `tmp[8]` 스택 오버플로 위험 제거. 결과
+  count 출력도 `%d`→`%u`로 수정.
+
+### Security
+- (SeungBeom) `sys_setpriority` 권한 가드 강화 — user-클래스 호출자가 이미
+  커널-클래스(priority < 0)인 대상(init 등)을 변경하지 못하도록 거부. 기존
+  가드는 음수 priority 부여(상승)만 막아, `PS`로 init pid를 알아낸 격리 agent가
+  `NICE`로 init을 user 범위로 강등시킬 수 있었음. 커널-클래스 호출자만 가능.
+- (SeungBeom) `sys_procinfo` 커널 스택 정보 노출 수정 — `struct procinfo`를
+  `memset`으로 0 초기화. `safestrcpy`가 `name[]` 꼬리를 0으로 채우지 않아
+  미초기화 커널 스택 바이트(엔트리당 최대 ~11B)가 copyout으로 유저에 노출됐음.
+
+---
+
 ## [2026-05-20] — 평가 자동화 & 설계 결정 문서화
 
 ### Added

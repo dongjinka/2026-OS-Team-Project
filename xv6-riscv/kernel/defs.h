@@ -100,12 +100,16 @@ void            wakeup(void*);
 uint64          cfs_vdelta(int);
 
 // agentcmd.c
-void            agentinit(void);
-void            agent_dispatch(char *);       // interrupt-safe: enqueues only
-void            agent_dispatch_now(char *);   // process-context: actual dispatch
-void            agent_drain(void);            // dequeue + dispatch queued lines
-void            agentcmd_init(void);          // jailed agent runtime queue init
-int             agentq_get(char *);           // jailed agent: blocking dequeue
+void            agent_dispatch(char *);       // interrupt-safe intake enqueue
+void            agent_drain(void);            // process-ctx: drain intake queue
+void            agent_dispatch_now(char *);   // process-ctx: route one wire line
+void            agentcmd_init(void);
+int             agentq_get(char *);
+int             deny_add(const char *);
+int             deny_remove(const char *);
+void            deny_reset(void);
+void            deny_clear(void);
+int             deny_snapshot(char *, int);
 
 // cache.c
 void            cacheinit(void);

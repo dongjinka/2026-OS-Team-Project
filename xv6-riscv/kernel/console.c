@@ -45,7 +45,7 @@ consputc(int c)
 struct {
   struct spinlock lock;
 
-  // input circular buffer (large enough for CACHE_SET lines with ~1KB keys+vals)
+  // input circular buffer (large enough for ASK/CACHE_SET lines with ~1KB args)
 #define INPUT_BUF_SIZE 2048
   char buf[INPUT_BUF_SIZE];
   uint r;  // Read index
@@ -107,12 +107,12 @@ consoleread(int user_dst, uint64 dst, int n)
         release(&cons.lock);
         return -1;
       }
-      // Drain agent dispatcher queue here — we have valid proc context
-      // and no other locks held (cons.lock is released for the sleep below).
+      // Drain the agent dispatcher queue here: valid proc context, cons.lock
+      // released so cache handlers may sleep on begin_op().
       release(&cons.lock);
       agent_drain();
       acquire(&cons.lock);
-      if(cons.r != cons.w) break;   // re-check after drain
+      if(cons.r != cons.w) break;   // re-check: drain may have produced output
       sleep(&cons.r, &cons.lock);
     }
 
@@ -203,9 +203,8 @@ consoleintr(int c)
           agent_dispatch(agent_buf);        // enqueue (interrupt-safe)
           acquire(&cons.lock);
           agent_len = 0;
-          // Wake shell so it gives us a brief proc context window for drain.
-          // Shell will find cons.r==cons.w and re-sleep, but during that
-          // wake-resleep window consoleread() drains the queue.
+          // Wake a reader so it gives us a process-context window to drain the
+          // queue (consoleread() finds cons.r==cons.w, drains, then re-sleeps).
           wakeup(&cons.r);
           release(&cons.lock);
           return;

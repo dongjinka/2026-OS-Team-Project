@@ -1,3 +1,5 @@
+// Ported into SeungBeom from commit 76b2737 (Se-Joong). Uses dispatch().
+//
 // write_race — 동일 파일에 동시에 wire WRITE 를 시도하는 4 자식 프로세스.
 //
 // 의도: inode sleeplock 으로 인한 직렬화를 시각화. 자식 4개가 거의 같은 tick
@@ -33,11 +35,12 @@ main(void)
     int pid = fork();
     if(pid < 0){ printf("fork failed\n"); exit(1); }
     if(pid == 0){
-      // wire = "REQ|agent:writer|WRITE|/shared.txt|pid=<P>-" + 'X'×N (긴 content
+      // wire = "REQ|agent:writer|WRITE|/shared.txt:pid=<P>-" + 'X'×N (긴 content
       // 로 ilock 점유 시간 늘려 sleeplock 직렬화가 tick 단위로 보이도록).
+      // SeungBeom agentd do_write wire는 WRITE|<file>:<data> (콜론 구분).
       char line[1024];
       char *p = line;
-      const char *pfx = "REQ|agent:writer|WRITE|" SHARED "|pid=";
+      const char *pfx = "REQ|agent:writer|WRITE|" SHARED ":pid=";
       while(*pfx) *p++ = *pfx++;
       char num[16];
       int nl = itoa(getpid(), num);

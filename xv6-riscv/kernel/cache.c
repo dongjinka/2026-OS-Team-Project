@@ -1,3 +1,11 @@
+// Ported into the SeungBeom branch from commit 76b2737 (PR #5, Sejoong branch).
+// Implements F9 (LLM response cache), previously only a reserved stub point.
+// Two deltas from the source commit:
+//   1. the syscalls that expose it were renumbered (set_cache=29, get_cache=30)
+//      to avoid colliding with SeungBeom's set_deny/get_deny/procinfo (26/27/28);
+//   2. disk_scan() now clamps a record's vlen to CACHE_VAL before returning it,
+//      closing a kernel-stack disclosure path via a user-planted /cache.bin.
+//
 // Phase 3 — LLM 응답 캐시 + 디스크 스왑 + 의미 매칭 (MinHash + Jaccard)
 //
 // 구조: 16-슬롯 RAM 테이블 + /cache.bin 디스크 오버레이.
@@ -143,9 +151,13 @@ disk_scan(uint64 hash, char *valbuf, int vbuflen)
     if(readi(ip, 0, (uint64)&rec_buf, off, sizeof(rec_buf)) != sizeof(rec_buf))
       break;
     if(rec_buf.hash == hash){
-      int n = (rec_buf.vlen < vbuflen) ? rec_buf.vlen : vbuflen;
+      // Clamp the on-disk vlen to CACHE_VAL: /cache.bin is user-writable (a
+      // jailed agent can plant a record with a bogus 0xFFFF vlen), so the
+      // returned length must never exceed the value buffer's real capacity.
+      int vlen = (rec_buf.vlen > CACHE_VAL) ? CACHE_VAL : rec_buf.vlen;
+      int n = (vlen < vbuflen) ? vlen : vbuflen;
       memmove(valbuf, rec_buf.val, n);
-      found = rec_buf.vlen;
+      found = vlen;
       break;
     }
   }

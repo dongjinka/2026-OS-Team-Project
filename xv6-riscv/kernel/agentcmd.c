@@ -3,26 +3,27 @@
 // LLM commands arrive over the QEMU serial port as lines of the form
 //
 //   REQ|<CMD>|<arg>\n
-//   REQ|agent:<role>|<CMD>|<arg>\n     (role optional; kept for wire-compat
-//                                       but ignored — jail is the boundary)
+//   REQ|agent:<role>|<CMD>|<arg>\n   (role optional; stripped + ignored here —
+//                                     the chroot jail, not ACL, is the boundary)
 //
-// Two-stage design:
-//   1) console.c (uart interrupt context) calls agent_dispatch() — enqueue only.
-//   2) consoleread() (process context with valid myproc()) calls agent_drain().
-// This split is mandatory because cache_get/cache_set / fs handlers may
-// trigger begin_op() which can sleep; sleeping in interrupt context faults.
+// Two-stage design (ported from commit 76b2737, Sejoong branch, then merged
+// with SeungBeom's configurable deny list):
+//   1) console.c / sys_dispatch enqueue raw lines via agent_dispatch() — this
+//      runs in *interrupt context* and must not sleep, so it only copies the
+//      line into a small intake ring (agent_q).
+//   2) agent_drain() runs in *process context* (usertrap + consoleread) and
+//      routes each line through agent_dispatch_now(). The split is mandatory
+//      because the cache handlers call cache_*() which may begin_op()/sleep —
+//      illegal in interrupt context.
 //
 // Routing inside agent_dispatch_now():
-//   - meta commands (ASK / LLM_RESP / CACHE_GET / CACHE_SET) are handled here
-//     because the cache lives in kernel memory (cache.c). The orchestration
-//     layer needs cache_get*/cache_set, which are kernel APIs.
-//   - every other wire command (PRINT / CHAT / READ / WRITE / LS / NICE / PS /
-//     LIST / SETPRIO / KILL / ...) is forwarded into agentq, the ring buffer
-//     consumed by the jailed agentd runtime (user/agentd.c) via the
-//     agent_recv() system call. agentd executes them *inside its chroot
-//     jail* with dangerous syscalls (exec/kill/mknod) refused by the kernel.
-//
-// Human shell input never travels this path — only LLM-issued commands do.
+//   - meta commands (ASK / LLM_RESP / CACHE_GET / CACHE_SET) are handled in the
+//     kernel because the response cache (cache.c, F9) lives in kernel memory.
+//     ASK consults the cache and only emits LLM_REQ| to the host on a miss —
+//     this is what makes the cache actually skip Solar API round-trips.
+//   - every other wire command is checked against the deny list (F7) and, if
+//     allowed, forwarded into agentq, the ring the jailed agentd consumes via
+//     agent_recv(). Human shell input never travels this path.
 
 #include "types.h"
 #include "param.h"
@@ -31,15 +32,11 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-#include "stat.h"
-#include "sleeplock.h"
-#include "fs.h"
-#include "file.h"
+#include "deny.h"
 
-// ───────────────── stage-1 queue: interrupt → process ─────────────────
-// agent_drain() pulls from this queue. Stage 1 may carry any wire line
-// (meta or otherwise); routing happens in agent_dispatch_now().
-
+// ───────────────── stage-1 intake queue: interrupt → process ─────────────────
+// Holds any raw wire line (meta or not); routing happens in dispatch_now.
+// AGENT_LINE_MAX is large because ASK carries a full natural-language prompt.
 #define AGENT_LINE_MAX 1280
 #define AGENT_Q_LEN    8
 
@@ -48,41 +45,143 @@ static int   agent_q_head, agent_q_tail;
 static struct spinlock agent_q_lock;
 
 // ───────────────── stage-2 queue: kernel → jailed agentd ─────────────────
-// Only non-meta wire commands land here. The jailed agentd pulls them via
-// sys_agent_recv() and executes them in user space.
-
-#define AGENTQ_N    16    // ring capacity
-#define AGENTQ_LEN  256   // max line length
+#define AGENTQ_N    16     // ring buffer capacity (commands)
+#define AGENTQ_LEN  256    // max length of one command line
 
 struct {
   struct spinlock lock;
   char buf[AGENTQ_N][AGENTQ_LEN];
-  int r;       // next slot to read
-  int w;       // next slot to write
-  int count;
+  int r;          // next slot to read
+  int w;          // next slot to write
+  int count;      // queued commands
 } agentq;
 
-// pending LLM request — set by handle_ask on cache miss, consumed by
-// handle_llm_resp so the response can be written back to cache_set with
-// the right key. Single-flight (agent.py REPL is serial).
+// pending LLM request — set by handle_ask on a cache miss, consumed by
+// handle_llm_resp so the host's response is cache_set under the right key.
+// agent_drain() can run on several CPUs at once, so pending_prompt/pending_len
+// are guarded by pending_lock (a later ASK must not clobber the key an
+// in-flight LLM_RESP will cache under).
 static char  pending_prompt[AGENT_LINE_MAX];
 static int   pending_len;
+static struct spinlock pending_lock;
 
-// ───────────────── init ─────────────────
+// Commands the kernel refuses outright: they never reach the agent runtime
+// (F7 — the hard sandbox boundary). Managed at runtime via set_deny()/get_deny()
+// and the `denyctl` shell tool. Guarded by a spinlock.
+struct {
+  struct spinlock lock;
+  char names[DENY_MAX][DENY_NAMELEN];
+  int count;
+} denylist;
 
+static const char *deny_default[] = { "KILL", "EXEC" };
+#define NDENY_DEFAULT ((int)(sizeof(deny_default) / sizeof(deny_default[0])))
+
+// Restore the built-in default deny list. Also used at boot.
 void
-agentinit(void)
+deny_reset(void)
 {
-  initlock(&agent_q_lock, "agent_q");
-  initlock(&agentq.lock, "agentq");
-  agentq.r = agentq.w = agentq.count = 0;
+  acquire(&denylist.lock);
+  denylist.count = 0;
+  for(int i = 0; i < NDENY_DEFAULT && i < DENY_MAX; i++)
+    safestrcpy(denylist.names[denylist.count++], deny_default[i], DENY_NAMELEN);
+  release(&denylist.lock);
 }
 
-// alias: legacy name used by main.c boot sequence on the main branch
+// Empty the deny list (nothing blocked at the kernel boundary).
+void
+deny_clear(void)
+{
+  acquire(&denylist.lock);
+  denylist.count = 0;
+  release(&denylist.lock);
+}
+
+// Add cmd to the deny list. Idempotent. Returns 0 on success, -1 if full.
+int
+deny_add(const char *cmd)
+{
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      release(&denylist.lock);
+      return 0;
+    }
+  }
+  if(denylist.count >= DENY_MAX){
+    release(&denylist.lock);
+    return -1;
+  }
+  safestrcpy(denylist.names[denylist.count++], cmd, DENY_NAMELEN);
+  release(&denylist.lock);
+  return 0;
+}
+
+// Remove cmd from the deny list. Returns 0 if removed, -1 if not present.
+int
+deny_remove(const char *cmd)
+{
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      for(int j = i; j < denylist.count - 1; j++)
+        safestrcpy(denylist.names[j], denylist.names[j + 1], DENY_NAMELEN);
+      denylist.count--;
+      release(&denylist.lock);
+      return 0;
+    }
+  }
+  release(&denylist.lock);
+  return -1;
+}
+
+// Copy the deny list into buf as newline-separated names. Returns byte length.
+int
+deny_snapshot(char *buf, int max)
+{
+  int n = 0;
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    const char *s = denylist.names[i];
+    while(*s && n < max - 2)
+      buf[n++] = *s++;
+    if(n < max - 1)
+      buf[n++] = '\n';
+  }
+  release(&denylist.lock);
+  if(n < max)
+    buf[n] = 0;
+  return n;
+}
+
 void
 agentcmd_init(void)
 {
-  agentinit();
+  initlock(&agent_q_lock, "agent_q");
+  agent_q_head = agent_q_tail = 0;
+  initlock(&agentq.lock, "agentq");
+  agentq.r = agentq.w = agentq.count = 0;
+  initlock(&pending_lock, "agent_pending");
+  pending_len = 0;
+  initlock(&denylist.lock, "denylist");
+  deny_reset();
+}
+
+// True if cmd is on the deny list. Called from dispatch_now (process context);
+// the spinlock is fine either way.
+static int
+deny_listed(const char *cmd)
+{
+  int found = 0;
+  acquire(&denylist.lock);
+  for(int i = 0; i < denylist.count; i++){
+    if(strncmp(denylist.names[i], cmd, DENY_NAMELEN) == 0){
+      found = 1;
+      break;
+    }
+  }
+  release(&denylist.lock);
+  return found;
 }
 
 // ───────────────── small utilities ─────────────────
@@ -101,18 +200,9 @@ str_starts(const char *s, const char *prefix)
   return 1;
 }
 
-static void
-copy_line(char *dst, const char *src, int max)
-{
-  int i = 0;
-  while(i < max-1 && src[i]){ dst[i] = src[i]; i++; }
-  dst[i] = 0;
-}
-
 // ───────────────── stage-2 enqueue (kernel → agentd) ─────────────────
 
 // Forward a complete wire line ("REQ|<CMD>|<arg>") to the agentd queue.
-// Drops silently if the queue is full.
 static void
 forward_to_agentd(const char *line)
 {
@@ -134,9 +224,9 @@ forward_to_agentd(const char *line)
   wakeup(&agentq);
 }
 
-// Wrap a bare wire payload ("PRINT|hi", "WRITE|/x|hello") in "REQ|" and
-// enqueue for agentd. Used by cache-hit and LLM_RESP paths, which carry
-// the raw payload without the REQ| prefix.
+// Wrap a bare wire payload ("PRINT|hi", "CHAT|...") in "REQ|" and enqueue for
+// agentd. Used by the cache-hit and LLM_RESP paths, and by the forward path
+// after the optional "agent:<role>|" prefix has been stripped.
 static void
 forward_wire_to_agentd(const char *wire)
 {
@@ -176,10 +266,10 @@ agentq_get(char *out)
   return i;
 }
 
-// ───────────────── meta-command handlers (in-kernel) ─────────────────
-// ASK / LLM_RESP / CACHE_GET / CACHE_SET — orchestration only. They never
-// touch the file system or kill processes; they only manipulate the
-// kernel cache (cache.c) and forward results to agentd.
+// ───────────────── meta-command handlers (in-kernel, process context) ─────────
+// ASK / LLM_RESP / CACHE_GET / CACHE_SET — orchestration only. They manipulate
+// the kernel cache (cache.c) and forward results to agentd; they never touch
+// the deny list (F7 only gates commands that reach the jailed runtime).
 
 static void
 handle_ask(char *arg)
@@ -187,10 +277,9 @@ handle_ask(char *arg)
   int plen = 0; while(arg[plen]) plen++;
   if(plen == 0) return;
 
-  // CACHE_VAL = 1024 (cache.c) + null terminator.
-  char cached[1025];
+  char cached[1025];   // CACHE_VAL (1024) + NUL
 
-  // 1) exact cache hit — forward the cached wire to agentd.
+  // 1) exact cache hit — forward the cached wire to agentd, skip the LLM.
   int clen = cache_get_exact(arg, plen, cached, sizeof(cached) - 1);
   if(clen >= 0){
     if(clen >= (int)sizeof(cached)) clen = sizeof(cached) - 1;
@@ -216,8 +305,10 @@ handle_ask(char *arg)
   }
 
   // 3) miss — record pending and ask the host to call the LLM.
-  copy_line(pending_prompt, arg, AGENT_LINE_MAX);
+  acquire(&pending_lock);
+  safestrcpy(pending_prompt, arg, AGENT_LINE_MAX);
   pending_len = plen;
+  release(&pending_lock);
   printf("LLM_REQ|%s\n", arg);
 }
 
@@ -225,10 +316,27 @@ static void
 handle_llm_resp(char *arg)
 {
   int alen = 0; while(arg[alen]) alen++;
-  if(pending_len > 0){
-    int rc = cache_set(pending_prompt, pending_len, arg, alen);
+
+  // Snapshot the pending key under the lock, then cache_set outside it
+  // (cache_set may sleep on begin_op(), illegal while holding a spinlock).
+  // key[] is deliberately small: this runs on the agent_drain() call chain,
+  // which already spends ~1280 B (drain local) + ~1KB (cache_set) of the
+  // one-page kernel stack — a full AGENT_LINE_MAX buffer here overflows it.
+  // Prompts longer than this simply aren't cached (best-effort cache).
+  char key[256];
+  int klen;
+  acquire(&pending_lock);
+  klen = pending_len;
+  pending_len = 0;
+  if(klen > 0 && klen < (int)sizeof(key))
+    safestrcpy(key, pending_prompt, sizeof(key));
+  else
+    klen = 0;
+  release(&pending_lock);
+
+  if(klen > 0){
+    int rc = cache_set(key, klen, arg, alen);
     if(rc < 0) printf("[cache] DROP (oversized %d B)\n", alen);
-    pending_len = 0;
   }
   forward_wire_to_agentd(arg);
 }
@@ -264,17 +372,16 @@ handle_cache_set(char *arg)
   printf("%s\n", (rc == 0) ? "RESP|OK" : "RESP|ERR");
 }
 
-// ───────────────── interrupt-safe enqueue ─────────────────
+// ───────────────── stage-1 enqueue (interrupt-safe) ─────────────────
 // console.c calls this for each "REQ|" line it sniffs from the serial port.
-// Interrupt context — only spinlock-protected enqueue, no sleep.
-
+// Interrupt context — only spinlock-protected enqueue, never sleeps.
 void
 agent_dispatch(char *line)
 {
   acquire(&agent_q_lock);
   int next = (agent_q_tail + 1) % AGENT_Q_LEN;
   if(next != agent_q_head){
-    copy_line(agent_q[agent_q_tail], line, AGENT_LINE_MAX);
+    safestrcpy(agent_q[agent_q_tail], line, AGENT_LINE_MAX);
     agent_q_tail = next;
   }
   // queue full: silently drop
@@ -282,9 +389,10 @@ agent_dispatch(char *line)
 }
 
 // ───────────────── process-context drain + route ─────────────────
-
-void
-agent_drain(void)
+// Pulls every queued line and routes it. Separated from agent_drain() so the
+// 1280-byte local frame is only reserved when there is actually work to do.
+static void
+agent_drain_locked(void)
 {
   for(;;){
     char local[AGENT_LINE_MAX];
@@ -293,7 +401,7 @@ agent_drain(void)
       release(&agent_q_lock);
       return;
     }
-    copy_line(local, agent_q[agent_q_head], AGENT_LINE_MAX);
+    safestrcpy(local, agent_q[agent_q_head], AGENT_LINE_MAX);
     agent_q_head = (agent_q_head + 1) % AGENT_Q_LEN;
     release(&agent_q_lock);
 
@@ -301,18 +409,30 @@ agent_drain(void)
   }
 }
 
+// Called from usertrap() (every trap) and consoleread(), in process context.
+// The unlocked head==tail check keeps the common empty case off the spinlock;
+// a stale read at worst defers one line to the next trap, where the locked
+// re-check in agent_drain_locked() is authoritative.
+void
+agent_drain(void)
+{
+  if(agent_q_head == agent_q_tail)
+    return;
+  agent_drain_locked();
+}
+
 // Parse "REQ|[agent:<role>|]<CMD>|<arg>" and route:
-//   - meta cmds run in-kernel (orchestration + cache)
-//   - everything else is forwarded to the jailed agentd
+//   - meta cmds run in-kernel (cache orchestration)
+//   - everything else is deny-checked (F7) then forwarded to the jailed agentd
+// Also callable directly from sys_dispatch() (already in process context).
 void
 agent_dispatch_now(char *line)
 {
   if(!(line[0]=='R' && line[1]=='E' && line[2]=='Q' && line[3]=='|'))
     return;
 
-  // Skip optional "agent:<role>|" prefix. role is currently ignored — jail
-  // (not ACL) is the sandboxing boundary. The prefix is kept on the wire
-  // for diagnostic logs and possible future per-role policy.
+  // Skip optional "agent:<role>|" prefix. role is ignored — jail (not ACL) is
+  // the boundary; the prefix is kept on the wire for diagnostic logs.
   char *cmd_start = line + 4;
   if(str_starts(cmd_start, "agent:")){
     char *bar = cmd_start + 6;
@@ -326,22 +446,28 @@ agent_dispatch_now(char *line)
   while(*bar && *bar != '|') bar++;
   char *cmd = cmd_start;
   char *arg;
-  if(*bar == '|'){
+  int had_bar = (*bar == '|');
+  if(had_bar){
     *bar = 0;
     arg = bar + 1;
   } else {
     arg = bar;
   }
 
-  // Meta commands — in-kernel, never reach agentd.
+  // Meta commands — in-kernel, never reach agentd or the deny list.
   if(str_eq(cmd, "ASK"))       { handle_ask(arg);       return; }
   if(str_eq(cmd, "LLM_RESP"))  { handle_llm_resp(arg);  return; }
   if(str_eq(cmd, "CACHE_GET")) { handle_cache_get(arg); return; }
   if(str_eq(cmd, "CACHE_SET")) { handle_cache_set(arg); return; }
 
-  // Everything else — restore original separator and forward verbatim to
-  // the jailed agentd. agentd parses its own wire ("REQ|<CMD>|<arg>") with
-  // the format the main branch already uses.
-  if(arg != bar) *bar = '|';
-  forward_to_agentd(line);
+  // F7: hard sandbox boundary — denied commands never reach the agent runtime.
+  if(deny_listed(cmd)){
+    printf("[agent] DENY '%s' (sandboxed: never reaches the agent)\n", cmd);
+    return;
+  }
+
+  // Forward "CMD|arg" (role prefix dropped) wrapped as "REQ|CMD|arg" so the
+  // jailed agentd sees the plain wire it already parses.
+  if(had_bar) *bar = '|';
+  forward_wire_to_agentd(cmd_start);
 }

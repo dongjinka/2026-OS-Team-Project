@@ -25,10 +25,3 @@ xv6-riscv/mkfs/mkfs
 
 # WSL alternate-data-stream artifacts
 *:Zone.Identifier*
-
-# IDE / editor 개인 설정
-.vscode/
-
-# 강의 배포 원본 + 개인 학습용 가이드 (개인 정리 본)
-project.md
-Project_Guide.md

@@ -1,3 +1,5 @@
+// Ported into SeungBeom from commit 76b2737 (Se-Joong). Uses dispatch().
+//
 // agent_multi — 4 concurrent agent processes, each with a different role.
 //
 // This is the Tier-2 demonstration for project.md's "multiple concurrent LLM
@@ -64,7 +66,7 @@ child_main(int idx, const char *role)
 
   char warg[96];
   q = strput(warg, wpath);
-  *q++ = '|';
+  *q++ = ':';                     // agentd do_write wire is WRITE|<file>:<data>
   q = strput(q, "agent ");
   *q++ = '0' + idx;
   q = strput(q, " wrote this");

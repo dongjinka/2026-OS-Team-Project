@@ -18,7 +18,10 @@
 #include "kernel/stat.h"
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
+#include "kernel/param.h"
 #include "user/user.h"
+#include "kernel/deny.h"
+#include "kernel/procinfo.h"
 
 #define JAIL "/agentbox"
 
@@ -26,18 +29,20 @@ struct fn {
   char *name;
   int   allowed;
   int   priority;
+  char *usage;       // how the LLM calls it (shown by HELP)
 };
 
 static struct fn table[] = {
-  { "PRINT",   1, 10 },
-  { "CHAT",    1, 10 },
-  { "READ",    1,  8 },
-  { "WRITE",   1, 12 },
-  { "LS",      1,  8 },
-  { "PS",      1,  6 },
-  { "NICE",    1,  5 },
-  { "LIST",    1,  0 },
-  { "SETPRIO", 1,  5 },
+  { "PRINT",   1, 10, "PRINT|<msg>" },
+  { "CHAT",    1, 10, "CHAT|<msg>" },
+  { "READ",    1,  8, "READ|<file>" },
+  { "WRITE",   1, 12, "WRITE|<file>:<text>" },
+  { "LS",      1,  8, "LS|" },
+  { "NICE",    1,  5, "NICE|<pid>:<prio 0..20>" },
+  { "LIST",    1,  0, "LIST|" },
+  { "SETPRIO", 1,  5, "SETPRIO|<FN>:<prio 0..20>" },
+  { "PS",      1,  8, "PS|" },
+  { "HELP",    1,  0, "HELP|" },
 };
 #define NFN ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -69,21 +74,12 @@ do_print(char *arg)
   printf("[agentd] %s\n", arg);
 }
 
-// CHAT <text> — natural-language response. agent.py forwards cache hits
-// of "CHAT|..." as well as the LLM's final answer through this path.
+// CHAT <text> — natural-language reply. The kernel forwards cache hits of
+// "CHAT|..." and the LLM's final answer (via LLM_RESP) through this path.
 static void
 do_chat(char *arg)
 {
   printf("[chat] %s\n", arg);
-}
-
-// PS — process list. xv6 does not yet expose process info via syscall to
-// userspace (procdump() is kernel-only). Stub until a sys_proclist is
-// added in a follow-up PR.
-static void
-do_ps(char *arg)
-{
-  printf("[agentd] PS: no userspace proc-list syscall yet; use kernel Ctrl-P\n");
 }
 
 // READ <path> — print a file's contents (path is chroot'd to the jail)
@@ -177,15 +173,38 @@ do_nice(char *arg)
     printf("[agentd] pid=%d prio=%d\n", pid, prio);
 }
 
-// LIST — report the agent's whitelist (F7) and per-function priority (F8)
+// True if name appears in the kernel deny-list snapshot (newline-separated).
+static int
+in_snapshot(const char *snap, const char *name)
+{
+  for(const char *s = snap; *s; ){
+    const char *n = name, *t = s;
+    while(*n && *t != '\n' && *t && *n == *t){ n++; t++; }
+    if(*n == 0 && (*t == '\n' || *t == 0))
+      return 1;
+    while(*s && *s != '\n') s++;     // advance to the next line
+    if(*s == '\n') s++;
+  }
+  return 0;
+}
+
+// LIST — report the agent's whitelist (F7) and per-function priority (F8).
+// Access reflects EFFECTIVE policy: a tool the human added to the kernel deny
+// list (via denyctl) shows DENY(kernel) — it never reaches this process.
 static void
 do_list(char *arg)
 {
+  char snap[DENY_MAX * DENY_NAMELEN];
+  int n = get_deny(snap, sizeof(snap));
+  if(n < 0) n = 0;
+  snap[n] = 0;
+
   printf("[agentd] agent functions (name | access | priority):\n");
-  for(int i = 0; i < NFN; i++)
-    printf("[agentd]   %s\t%s\tprio=%d\n",
-           table[i].name, table[i].allowed ? "ALLOW" : "DENY",
-           table[i].priority);
+  for(int i = 0; i < NFN; i++){
+    const char *acc = in_snapshot(snap, table[i].name) ? "DENY(kernel)"
+                      : (table[i].allowed ? "ALLOW" : "DENY");
+    printf("[agentd]   %s\t%s\tprio=%d\n", table[i].name, acc, table[i].priority);
+  }
 }
 
 // SETPRIO <FN>:<prio> — F8: the LLM retunes a function's priority
@@ -209,6 +228,41 @@ do_setprio(char *arg)
     }
   }
   printf("[agentd] SETPRIO: no such function '%s'\n", arg);
+}
+
+// PS — report the live process table so the agent can pick a pid for NICE.
+static void
+do_ps(char *arg)
+{
+  static const char *st[] = {
+    "unused", "used", "sleep", "runble", "run", "zombie"
+  };
+  struct procinfo pi[NPROC];
+  int n = procinfo(pi, NPROC);
+  if(n < 0){
+    printf("[agentd] PS: procinfo failed\n");
+    return;
+  }
+  printf("[agentd] processes (pid | state | prio | name):\n");
+  for(int i = 0; i < n; i++){
+    const char *s = (pi[i].state >= 0 && pi[i].state < 6) ? st[pi[i].state] : "?";
+    printf("[agentd]   %d\t%s\t%d\t%s%s%s\n",
+           pi[i].pid, s, pi[i].priority, pi[i].name,
+           pi[i].priority < 0 ? " [K]" : "", pi[i].is_agent ? " [A]" : "");
+  }
+}
+
+// HELP — self-describing command catalog: how to call each tool (usage),
+// whether it's allowed, and the priority it runs at. Lets the LLM discover
+// the command set and argument formats at runtime.
+static void
+do_help(char *arg)
+{
+  printf("[agentd] commands (usage | access | priority):\n");
+  for(int i = 0; i < NFN; i++)
+    printf("[agentd]   %s\t%s\tprio=%d\n",
+           table[i].usage, table[i].allowed ? "ALLOW" : "DENY",
+           table[i].priority);
 }
 
 // ───────────────────────────── dispatch ─────────────────────────────
@@ -240,10 +294,11 @@ execute(char *line)
       else if(streq(cmd, "READ"))    do_read(arg);
       else if(streq(cmd, "WRITE"))   do_write(arg);
       else if(streq(cmd, "LS"))      do_ls(arg);
-      else if(streq(cmd, "PS"))      do_ps(arg);
       else if(streq(cmd, "NICE"))    do_nice(arg);
       else if(streq(cmd, "LIST"))    do_list(arg);
       else if(streq(cmd, "SETPRIO")) do_setprio(arg);
+      else if(streq(cmd, "PS"))      do_ps(arg);
+      else if(streq(cmd, "HELP"))    do_help(arg);
       return;
     }
   }
@@ -255,7 +310,7 @@ main(void)
 {
   // Ensure the jail directory exists, then confine ourselves to it.
   // (mkdir must happen before jail() — afterward '/' is the jail root.)
-  mkdir(JAIL);     // -1 if it already exists from a previous boot — OK
+  mkdir(JAIL);
   if(jail(JAIL) < 0){
     printf("[agentd] FATAL: jail(%s) failed\n", JAIL);
     exit(1);

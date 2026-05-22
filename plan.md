@@ -41,7 +41,7 @@
 | F7 샌드박싱 | ✅ 완료 | 함수 화이트리스트 + chroot jail + 위험 syscall 차단 |
 | F8 함수별 Priority | ✅ 완료 | `LIST`/`SETPRIO`, agentd가 함수별 priority 적용 |
 | (추가) 에이전트 루프 | ✅ 완료 | `agent.py` ReAct + 대화 메모리, agentd 라우팅 |
-| F9 응답 캐시 | ❌ 미구현 | §5.2 (여유 시) |
+| F9 응답 캐시 | ✅ 완료 | cache.c + 커널 `ASK` 오케스트레이션 + `dispatch`(31) + `agent.py :ask`; 히트 시 Solar 생략 §5.2 |
 | F10 LoRA 학습 | ❌ 범위 외 | Future Work (§6) |
 
 ---
@@ -86,10 +86,18 @@ F2 · F3 · F4 · F7 · F8 + `agent.py` 자율 에이전트 루프를 구현했�
 "사람이 친 셸 명령은 그대로, **LLM이 만든 명령만 jail 안에서 실행**"을 위해
 명령 실행 경로를 분리했다. 세 계층으로 구성된다.
 
-**(a) 커널 측 — 명령 큐 + 거부 목록** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)):
-- `agent_dispatch()`는 콘솔 인터럽트 컨텍스트에서 동작 → fork·파일 작업 불가.
-  실행하지 않고, **거부 목록**(`KILL`/`EXEC`)만 즉시 차단한 뒤 나머지 `REQ|`
-  라인을 커널 링버퍼(`agentq`)에 적재.
+**(a) 커널 측 — 2단계 명령 디스패치 + 거부 목록** ([agentcmd.c](xv6-riscv/kernel/agentcmd.c)):
+- `agent_dispatch()`는 콘솔 인터럽트 컨텍스트에서 동작 → fork·파일 작업·sleep
+  불가. 실행하지 않고 intake 링버퍼에 적재만 한다. 프로세스 컨텍스트의
+  `agent_drain()`(usertrap/consoleread)→`agent_dispatch_now()`이 라우팅: 메타
+  명령(`ASK` 등)은 F9 캐시 처리, 그 외는 **거부 목록**(기본 `KILL`/`EXEC`) 검사
+  후 통과분만 `agentq`에 적재. (캐시가 `begin_op`로 sleep할 수 있어 2단계 필수.)
+- **거부 목록은 설정 가능** (하드코딩 아님): 스핀락으로 보호되는 커널 RAM
+  목록 + `set_deny`/`get_deny` syscall + 셸 도구 `denyctl`. 일회성(RAM) ·
+  영구(`/denylist.conf`, 부팅 시 `init`이 `denyctl load`로 자동 적용) ·
+  기본 복귀(`reset`) 지원. `set_deny`는 `is_agent` 프로세스를 거부 → 사람만
+  변경 가능. 커널 목록 하나가 하드 경계 명령과 agentd 도구를 모두 통제하며,
+  agentd `LIST`가 실효 정책을 표시.
 - 신규 `agent_recv()` 시스템 콜([sysproc.c](xv6-riscv/kernel/sysproc.c))로
   격리 프로세스만 큐를 비울 수 있음 (`is_agent`만 호출 가능).
 
@@ -111,9 +119,11 @@ F2 · F3 · F4 · F7 · F8 + `agent.py` 자율 에이전트 루프를 구현했�
 - 시작 즉시 `jail("/agentbox")`로 자기 격리 → 명령 큐에서 명령을 받아
   **jail 안에서** 실행.
 - 도구 테이블 보유 (F7 화이트리스트 + F8 함수별 priority):
-  `PRINT` · `READ` · `WRITE` · `LS` · `NICE` · `LIST` · `SETPRIO`.
+  `PRINT` · `READ` · `WRITE` · `LS` · `NICE` · `LIST` · `SETPRIO` · `PS` · `HELP`.
 - 각 도구 실행 전 `setpriority(self, table[i].priority)`로 함수별 우선순위
   적용 → F8의 "LLM 주도 priority 커스텀화"가 실제 스케줄러에 반영됨.
+- **AI 자기관찰**: `PS`(프로세스 목록 — 신규 `procinfo` syscall)로 LLM이 pid를
+  파악해 `NICE`에 사용, `HELP`(usage 카탈로그)로 호출법 확인 → 관찰→행동 루프.
 
 **결과**: 사람의 셸 입력은 무제한 그대로. LLM 명령은 모두 chroot jail + 위험
 syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달하지 못함
@@ -166,11 +176,27 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 | `kernel/defs.h` | `cfs_vdelta`·`agentcmd_init`·`agentq_get` 프로토타입 |
 | `user/init.c` | `agentd` 자동 기동 추가 |
 | `user/{user.h,usys.pl}` | `jail()`·`agent_recv()` 스텁 |
-| `user/agentd.c` | **신규** — 격리 에이전트 런타임 (도구 테이블·LS 포함) |
+| `user/agentd.c` | **신규** — 격리 에이전트 런타임 (도구 테이블·LS 포함); `LIST`가 커널 거부 목록 반영 |
+| `kernel/deny.h` | **신규** — 거부 목록 op 상수(커널·user 공유) |
+| `kernel/agentcmd.c` | 거부 목록을 가변·스핀락 구조로 + `deny_add/remove/reset/clear/snapshot` |
+| `kernel/sysproc.c` | `sys_set_deny`·`sys_get_deny` 신규(사람 전용 가드) |
+| `user/denyctl.c` | **신규** — 거부 목록 관리 셸 도구 |
+| `user/init.c` | 부팅 시 `denyctl load` 1회 추가 |
 | `user/agentdemo.c` | **신규** — F2·F7 데모 프로그램 |
 | `mkfs/mkfs.c` | **신규(복원)** — `.gitignore`가 `mkfs/`를 통째 제외해 누락 |
 | `agent.py` | 단발 번역기 → 자율 에이전트 루프, `.env` 로더, 출력 동기화 |
-| `Makefile` | `_agentdemo`·`_agentd` UPROGS 등록 |
+| `kernel/cache.c` | **신규(이식)** — F9 LLM 응답 캐시(RAM+디스크·MinHash/Jaccard). `76b2737` 이식 + 보안 하드닝 |
+| `kernel/sysproc.c` | `sys_set_cache`·`sys_get_cache` 신규(번호 29·30) |
+| `kernel/sysfile.c` | `create()` non-static 전환(cache.c가 `/cache.bin` 지연 생성) |
+| `kernel/main.c` | `cacheinit()` 호출 추가 |
+| `user/cache_test.c` | **신규(이식)** — F9 캐시 단독 테스트(13/13 통과) |
+| `kernel/agentcmd.c` | F9 연결 — 2단계 디스패치(`agent_dispatch`/`agent_drain`/`agent_dispatch_now`) + 캐시 메타 명령(`ASK`/`LLM_RESP`/`CACHE_GET/SET`) |
+| `kernel/trap.c`, `kernel/console.c` | `agent_drain()` 호출(프로세스 컨텍스트); console 입력 버퍼 256→2048 |
+| `kernel/sysproc.c` | `sys_dispatch()` 신규(번호 31) |
+| `user/agentd.c` | `CHAT` 핸들러 추가 |
+| `user/{eval,agent_multi,write_race}.c` | **신규(이식)** — `dispatch` 기반 캐시·ACL·동시성 데모(`76b2737`) |
+| `agent.py` | `:ask`(커널 F9 캐시 경로) + `LLM_REQ` 응답 추가 |
+| `Makefile` | `cache.o`·`_cache_test`·`_eval`·`_agent_multi`·`_write_race`·`_agentdemo`·`_agentd` 등록 |
 | `plan.md` | **신규** — 본 문서 |
 
 ---
@@ -184,7 +210,7 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 | 샌드박싱 | 거부 명령(`KILL`/`EXEC`) 호출 시 100% DENY, 허용 명령 정상 동작 |
 | Jail 격리 | `..` 탈출·절대경로 접근·외부 파일 가시성 모두 차단되는지 |
 | 에이전트 루프 | 멀티스텝 작업의 도구 호출 횟수·성공률·대화 메모리 활용도 |
-| 캐시 (F9 구현 시) | 히트율, 히트 시 응답 지연 vs 미스 시(API 왕복) 지연 비교 |
+| 캐시 (F9, `agent.py` 연동 시) | 히트율, 히트 시 응답 지연 vs 미스 시(API 왕복) 지연 비교. 커널·`cache_test`는 구현 완료, 종단 측정은 연동 후 |
 
 ---
 
@@ -216,15 +242,31 @@ syscall 차단 안에서만 동작. 커널 거부 명령은 agentd까지 도달�
 의 "선택 작업"으로 표기하되, 보안·유지보수 비용 대비 학습적 가치 외 실익이
 없어 우선순위 최하.
 
-### 5.2 F9 — LLM 응답 캐시 (여유 시)
+### 5.2 F9 — LLM 응답 캐시 (✅ 구현·연결 완료)
 
-- `kernel/cache.c` 신설: 고정 크기 엔트리 배열 `{key[64], val[256], last_use}`,
-  LRU 교체. 동적 할당 없이 정적 배열.
-- 시스템 콜 `sys_cache_get`/`sys_cache_set` 또는 디스패처 명령
-  `CACHE_GET`/`CACHE_SET`.
-- `agent.py`는 LLM 호출 전 `CACHE_GET` 조회, 히트면 API 호출 생략 →
-  비용·지연 절감.
-- (확장) `fs.img` 파일 백킹으로 재부팅 후에도 캐시 유지 — 파일시스템 개념 시연.
+저장 엔진(Se-Joong 원작 `c56b028`을 `76b2737`에서 이식):
+
+- `kernel/cache.c`: 16-슬롯 RAM 테이블 + `/cache.bin` 디스크 오버레이(full RAM에
+  set 시 LRU 슬롯을 디스크에 append, 디스크 hit 시 RAM으로 promote). 키는
+  FNV-1a 64-bit 해시로 압축 — 동적 할당 없는 정적 배열.
+- 시스템 콜 `set_cache`/`get_cache`(번호 29·30). `user/cache_test.c` 13/13 통과.
+- 의미 매칭: MinHash + Jaccard로 정확 매치 미스 시 paraphrase·어순변경·부분
+  치환을 탐지(임계 Jaccard 0.7). `/cache.bin` 백킹으로 재부팅 후에도 유지.
+
+명령 경로 연결 (이번 작업 — `76b2737`의 오케스트레이션을 SeungBeom 구조에 적응):
+
+- `agentcmd.c`를 2단계로 분리: `agent_dispatch`(인터럽트, enqueue) →
+  `agent_drain`(프로세스 컨텍스트, usertrap/consoleread) → `agent_dispatch_now`.
+  캐시는 디스크 I/O(`begin_op`)로 sleep할 수 있어 프로세스 컨텍스트가 필수.
+- 메타 명령 `ASK`/`LLM_RESP`/`CACHE_GET`/`CACHE_SET`을 커널에서 처리. `ASK`는
+  캐시 조회 → 히트면 agentd로 직접 전달(Solar 생략), 미스면 `LLM_REQ` 발신 →
+  호스트 `LLM_RESP` 수신 시 `cache_set` 후 전달.
+- 새 `dispatch` syscall(번호 31)로 유저 프로그램이 같은 경로를 구동
+  (`eval`/`agent_multi`/`write_race`). agentd에 `CHAT` 핸들러 추가.
+- 호스트 `agent.py`: `:ask <프롬프트>`가 이 경로를 사용(기본 ReAct 루프는 유지).
+- F7 deny 검사는 `agent_dispatch_now`의 forward 경로로 이동해 경계 유지.
+
+남은 여지 (선택): `:ask`를 기본 입력으로 승격 / 긴 응답용 stage-2 버퍼 확대.
 
 ### 5.3 평가·벤치마크 강화 (✅ 완료)
 

@@ -1,3 +1,6 @@
+// Ported into the SeungBeom branch from commit 76b2737 (PR #5, Sejoong branch).
+// Exercises the kernel cache via set_cache/get_cache (syscalls 29/30 here).
+//
 // Phase 3 — LLM cache 단독 시연 테스트 (userspace).
 //
 // 목적: 커널 캐시(syscalls set_cache/get_cache)가 RAM hit / RAM full evict /

@@ -105,6 +105,9 @@ extern uint64 sys_setpriority(void);
 extern uint64 sys_getpriority(void);
 extern uint64 sys_jail(void);
 extern uint64 sys_agent_recv(void);
+extern uint64 sys_set_deny(void);
+extern uint64 sys_get_deny(void);
+extern uint64 sys_procinfo(void);
 extern uint64 sys_set_cache(void);
 extern uint64 sys_get_cache(void);
 extern uint64 sys_dispatch(void);
@@ -137,6 +140,9 @@ static uint64 (*syscalls[])(void) = {
 [SYS_getpriority] sys_getpriority,
 [SYS_jail]    sys_jail,
 [SYS_agent_recv] sys_agent_recv,
+[SYS_set_deny] sys_set_deny,
+[SYS_get_deny] sys_get_deny,
+[SYS_procinfo] sys_procinfo,
 [SYS_set_cache] sys_set_cache,
 [SYS_get_cache] sys_get_cache,
 [SYS_dispatch]  sys_dispatch,

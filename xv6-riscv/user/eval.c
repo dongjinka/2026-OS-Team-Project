@@ -1,3 +1,6 @@
+// Ported into SeungBeom from commit 76b2737 (Se-Joong). Drives the cache via
+// get_cache/set_cache and the agent path via dispatch() — both now wired in.
+//
 // Evaluation harness for the LLM-OS kernel.
 //
 //   eval cache    <N>   LLM cache: round-1 miss / round-2 hit rate

@@ -6,6 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "deny.h"
+#include "procinfo.h"
 
 extern struct proc proc[NPROC];
 
@@ -125,10 +127,22 @@ sys_setpriority(void)
   if(priority < 0 && myproc()->priority >= 0)
     return -1;
 
+  // Snapshot the caller's class once, before taking any p->lock — so the
+  // per-target check below never reads myproc()->priority while holding an
+  // unrelated process's lock.
+  int caller_kernel = (myproc()->priority < 0);
+
   struct proc *p;
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     if(p->pid == pid){
+      // F2/F7: a user-class caller may not modify a kernel-class process
+      // (e.g. init). Otherwise the jailed agent could demote the supervisor
+      // out of kernel-class via NICE. Only kernel-class callers may.
+      if(p->priority < 0 && !caller_kernel){
+        release(&p->lock);
+        return -1;
+      }
       p->priority = priority;
       release(&p->lock);
       return 0;
@@ -179,8 +193,103 @@ sys_agent_recv(void)
   return n;
 }
 
+// set_deny(op, cmd): mutate the F7 command deny list. Only non-agent (human-
+// side) processes may call it, so a sandboxed agent cannot weaken its own
+// boundary. op is DENY_ADD/DENY_REMOVE/DENY_RESET (kernel/deny.h).
+uint64
+sys_set_deny(void)
+{
+  int op;
+  char cmd[DENY_NAMELEN];
+
+  if(myproc()->is_agent)    // a jailed agent must not edit the deny list
+    return -1;
+
+  argint(0, &op);
+  if(op == DENY_RESET){
+    deny_reset();
+    return 0;
+  }
+  if(op == DENY_CLEAR){
+    deny_clear();
+    return 0;
+  }
+  if(argstr(1, cmd, DENY_NAMELEN) < 0)
+    return -1;
+  if(op == DENY_ADD)
+    return deny_add(cmd);
+  if(op == DENY_REMOVE)
+    return deny_remove(cmd);
+  return -1;
+}
+
+// get_deny(buf, max): copy the deny list into buf as newline-separated names.
+// Readable by anyone (no mutation), so agentd can render effective policy.
+uint64
+sys_get_deny(void)
+{
+  uint64 uaddr;
+  int max;
+  char kbuf[DENY_MAX * DENY_NAMELEN];
+
+  argaddr(0, &uaddr);
+  argint(1, &max);
+  if(max <= 0)
+    return -1;
+  if(max > (int)sizeof(kbuf))
+    max = sizeof(kbuf);
+
+  int n = deny_snapshot(kbuf, max);
+  if(copyout(myproc()->pagetable, uaddr, kbuf, n + 1) < 0)
+    return -1;
+  return n;
+}
+
+// procinfo(buf, max): copy up to `max` non-UNUSED process entries into the
+// user array `buf`. Returns the count. Read-only observability: lets a user
+// program (and the LLM agent via agentd PS) see pid/state/priority/name so it
+// can reason about the system. Each proc's lock is held only long enough to
+// snapshot one entry; copyout happens after release.
+uint64
+sys_procinfo(void)
+{
+  uint64 uaddr;
+  int max;
+  argaddr(0, &uaddr);
+  argint(1, &max);
+  if(max <= 0)
+    return -1;
+
+  struct proc *self = myproc();
+  int n = 0;
+  for(struct proc *p = proc; p < &proc[NPROC] && n < max; p++){
+    struct procinfo pi;
+    memset(&pi, 0, sizeof(pi));   // don't leak kernel stack via name[]'s tail
+    acquire(&p->lock);
+    if(p->state == UNUSED){
+      release(&p->lock);
+      continue;
+    }
+    pi.pid = p->pid;
+    pi.state = p->state;
+    pi.priority = p->priority;
+    pi.is_agent = p->is_agent;
+    safestrcpy(pi.name, p->name, sizeof(pi.name));
+    release(&p->lock);
+
+    if(copyout(self->pagetable, uaddr + (uint64)n * sizeof(pi),
+               (char *)&pi, sizeof(pi)) < 0)
+      return -1;
+    n++;
+  }
+  return n;
+}
+
+// F9 — LLM response cache, ported from commit 76b2737 (Sejoong branch).
+// Exposed here as syscalls SYS_set_cache (29) / SYS_get_cache (30); the cache
+// body lives in kernel/cache.c.
 #define MAX_KEY_LEN 1024
-#define MAX_VAL_LEN 256
+#define MAX_VAL_LEN 256   // userspace value cap; must stay <= CACHE_VAL in cache.c
 
 uint64
 sys_set_cache(void)
@@ -225,14 +334,19 @@ sys_get_cache(void)
   int vlen = cache_get(key_buf, klen, val_buf, MAX_VAL_LEN);
   if(vlen < 0) return -1;
 
-  int n = (vlen < vbuflen) ? vlen : vbuflen;
+  // cache_get filled at most MAX_VAL_LEN bytes of val_buf; never copy out past
+  // that, regardless of the returned vlen or the caller-supplied vbuflen.
+  int avail = (vlen < MAX_VAL_LEN) ? vlen : MAX_VAL_LEN;
+  int n = (avail < vbuflen) ? avail : vbuflen;
   if(n > 0 && copyout(p->pagetable, vbuf_addr, val_buf, n) < 0) return -1;
   return vlen;
 }
 
-// Allow userspace to feed the agent dispatcher directly — same wire format
-// the QEMU serial port accepts ("REQ|...\n" or "REQ|agent:<role>|...\n").
-// Used by eval / agent_multi for in-kernel cache + jail demos.
+// Feed the agent dispatcher directly from userspace — same wire format the
+// QEMU serial port accepts ("REQ|...\n" or "REQ|agent:<role>|...\n"). Runs in
+// process context, so it routes synchronously via agent_dispatch_now (cache
+// meta-commands + deny-checked forward to agentd). Used by eval/agent_multi/
+// write_race to drive the cache + jail demos without the serial bridge.
 #define MAX_DISPATCH_LEN 1024
 
 uint64

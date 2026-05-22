@@ -153,6 +153,7 @@ UPROGS=\
 	$U/_agent_multi\
 	$U/_write_race\
 	$U/_cfs_share\
+	$U/_denyctl\
 	$U/_agentdemo\
 	$U/_agentd\
 
