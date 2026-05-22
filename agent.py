@@ -29,6 +29,7 @@ Usage:
     python3 agent.py                  # another terminal
 """
 
+import codecs
 import json
 import os
 import socket
@@ -40,6 +41,7 @@ SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 DEFAULT_MODEL = "solar-pro2"      # override via UPSTAGE_MODEL
 MAX_STEPS = 8                     # tool calls allowed per user request
 MAX_HISTORY = 24                  # chat messages kept besides the system prompt
+WIRE_MAX = 1200                   # max bytes for one REQ| line (kernel intake cap)
 
 
 def load_dotenv():
@@ -275,7 +277,12 @@ class Agent:
 
     def _reader(self):
         # Live-print xv6 output and, while capturing, accumulate it raw.
+        # The incremental decoder is mandatory: the kernel emits multi-byte
+        # (e.g. Korean) output one byte per consputc(), so a single UTF-8
+        # character arrives split across several recv() chunks. Decoding each
+        # chunk on its own would drop the partial bytes and lose the char.
         self.sock.settimeout(0.3)
+        decoder = codecs.getincrementaldecoder("utf-8")("ignore")
         pending = ""
         while True:
             try:
@@ -289,7 +296,7 @@ class Agent:
                 return
             if not chunk:
                 return
-            text = chunk.decode("utf-8", "ignore").replace("\r", "")
+            text = decoder.decode(chunk).replace("\r", "")
             with self.cap_lock:
                 if self.capturing:
                     self.capture_buf += text
@@ -450,7 +457,10 @@ class Agent:
         The kernel matches exactly (FNV-1a) and then semantically (MinHash /
         Jaccard), so a paraphrase of an earlier question can still hit."""
         key = question.replace("\n", " ").replace("\r", " ")
-        resp = self._cache_rpc("REQ|CACHE_GET|" + key)
+        wire = "REQ|CACHE_GET|" + key
+        if len(wire.encode("utf-8")) > WIRE_MAX:   # over the kernel line limit
+            return None
+        resp = self._cache_rpc(wire)
         if resp and resp.startswith("RESP|HIT|"):
             return resp[len("RESP|HIT|"):].replace("\\n", "\n")
         return None
@@ -465,10 +475,13 @@ class Agent:
             return
         # one wire line: collapse newlines so the value can't split the line.
         val = answer_text.replace("\r", "").replace("\n", "\\n")
-        if len(val.encode("utf-8")) > 900:    # kernel slot is 1024 B — keep margin
-            return
         klen = len(key.encode("utf-8"))
-        self._cache_rpc(f"REQ|CACHE_SET|{klen}:{key}{val}")
+        wire = f"REQ|CACHE_SET|{klen}:{key}{val}"
+        # an over-long wire line would be truncated by the kernel intake buffer
+        # and corrupt the cache — skip it (the answer just won't be cached).
+        if len(wire.encode("utf-8")) > WIRE_MAX:
+            return
+        self._cache_rpc(wire)
 
     # ---------- agent loop ----------
 
