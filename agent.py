@@ -32,10 +32,16 @@ Usage:
 import codecs
 import json
 import os
+import select
 import socket
 import sys
 import threading
 import time
+
+try:
+    import termios            # POSIX raw-mode REPL input editor
+except ImportError:           # non-POSIX host — the REPL falls back to input()
+    termios = None
 
 SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 DEFAULT_MODEL = "solar-pro2"      # override via UPSTAGE_MODEL
@@ -69,6 +75,14 @@ def load_dotenv():
 _LOCK = threading.Lock()
 _cursor = "start"
 
+# Raw-mode REPL input-editor state (all guarded by _LOCK). While _input_live
+# is set, the REPL is collecting a line in raw mode; every async writer must
+# lift that line off-screen (_wipe_input) and redraw it (_draw_input) so
+# concurrent xv6 output can never strand characters or desync backspace.
+_input_live = False
+_input_buf = ""
+_input_prompt = ""
+
 _RST, _GREEN, _CYAN = "\033[0m", "\033[92m", "\033[96m"
 _YELLOW, _RED, _BOLD, _DIM = "\033[93m", "\033[91m", "\033[1m", "\033[2m"
 
@@ -81,10 +95,82 @@ def _raw(s: str) -> None:
         pass  # stdout closed during shutdown
 
 
+# ── live raw-mode input editor: width math + line lift/redraw ───────────
+_CJK_RANGES = (
+    (0x1100, 0x115F), (0x2E80, 0x303E), (0x3041, 0x33FF), (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF), (0xA000, 0xA4CF), (0xAC00, 0xD7A3), (0xF900, 0xFAFF),
+    (0xFE30, 0xFE4F), (0xFF00, 0xFF60), (0xFFE0, 0xFFE6),
+)
+
+
+def _disp_width(s: str) -> int:
+    """On-screen column width of `s`: CJK / Hangul glyphs occupy two columns,
+    control characters none."""
+    w = 0
+    for ch in s:
+        o = ord(ch)
+        if o < 0x20:
+            continue
+        if 0x20000 <= o <= 0x3FFFD or any(lo <= o <= hi
+                                          for lo, hi in _CJK_RANGES):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+def _vis_width(s: str) -> int:
+    """Display width of `s`, skipping embedded ANSI escape sequences."""
+    out, i, n = 0, 0, len(s)
+    while i < n:
+        if s[i] == "\033":
+            i += 1
+            if i < n and s[i] == "[":
+                i += 1
+                while i < n and not s[i].isalpha():
+                    i += 1
+            i += 1
+            continue
+        out += _disp_width(s[i])
+        i += 1
+    return out
+
+
+def _term_cols() -> int:
+    try:
+        return os.get_terminal_size().columns or 80
+    except OSError:
+        return 80
+
+
+def _wipe_input() -> None:
+    """Erase the live input line (prompt + typed text), including any rows it
+    wrapped onto, leaving the cursor where the line began. Call holding _LOCK
+    while _input_live is set."""
+    width = _vis_width(_input_prompt) + _disp_width(_input_buf)
+    rows_above = (width - 1) // _term_cols() if width > 0 else 0
+    _raw("\r\033[2K")
+    for _ in range(rows_above):
+        _raw("\033[1A\033[2K")
+    _raw("\r")
+
+
+def _draw_input() -> None:
+    """Redraw the live input line. Call holding _LOCK while _input_live."""
+    _raw(_input_prompt + _input_buf)
+
+
 def _line(text: str, color: str) -> None:
-    """Write one complete bridge-side line; always starts on a fresh line."""
+    """Write one complete bridge-side line; always starts on a fresh line.
+    While the raw-mode editor is live, lift the input line off-screen, print,
+    then redraw it below so the user's typing is never disturbed."""
     global _cursor
     with _LOCK:
+        if _input_live:
+            _wipe_input()
+            _raw(f"{color}{text}{_RST}\n")
+            _draw_input()
+            return
         if _cursor != "start":
             _raw(_RST + "\n")
         _raw(f"{color}{text}{_RST}\n")
@@ -103,13 +189,18 @@ def answer(text):
     """Print the model's final answer as a clearly delimited block."""
     global _cursor
     with _LOCK:
-        if _cursor != "start":
+        if _input_live:
+            _wipe_input()
+        elif _cursor != "start":
             _raw(_RST + "\n")
         _raw(f"{_BOLD}{_CYAN}╭─ answer ──────────────────────────────────────╮{_RST}\n")
         for ln in str(text).rstrip().split("\n"):
             _raw(f"{_BOLD}{_CYAN}│{_RST} {ln}\n")
         _raw(f"{_BOLD}{_CYAN}╰───────────────────────────────────────────────╯{_RST}\n")
-        _cursor = "start"
+        if _input_live:
+            _draw_input()
+        else:
+            _cursor = "start"
 
 
 # ── prompt + parsing ───────────────────────────────────────────────────
@@ -199,6 +290,109 @@ def clean_observation(text: str) -> str:
                 break
         out.append(ln)
     return "\n".join(out).strip()
+
+
+def _drain_escape(fd: int) -> None:
+    """Swallow the remaining bytes of an ESC sequence (arrow / navigation
+    keys) already buffered in raw mode, so they are not inserted as text."""
+    while select.select([fd], [], [], 0.0)[0]:
+        if not os.read(fd, 32):
+            break
+
+
+def _read_line(prompt: str) -> str:
+    """Read one REPL line.
+
+    On a real terminal this is a raw-mode line editor that owns its own
+    buffer and redraws the whole input line on every change. Because the
+    buffer is ours, backspace is just `buf[:-1]` + redraw — it can never
+    strand the first character. Concurrent xv6 output is printed via
+    _wipe_input / _draw_input, so async writes never desync the input.
+
+    On a non-tty (piped input, tests) it falls back to plain input()."""
+    global _cursor, _input_live, _input_buf, _input_prompt
+
+    if termios is None or not sys.stdin.isatty():
+        with _LOCK:
+            if _cursor != "start":
+                _raw(_RST + "\n")
+            _raw("\n" + prompt)
+            _cursor = "other"
+        return input()
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    mode = termios.tcgetattr(fd)
+    # Raw INPUT: no canonical line editing, no echo, no signal / flow-control
+    # keys. OUTPUT post-processing (mode[1]) is left ON so '\n' from the async
+    # print helpers still yields a carriage return while raw mode is held.
+    mode[0] &= ~(termios.BRKINT | termios.ICRNL | termios.INPCK |
+                 termios.ISTRIP | termios.IXON)
+    mode[3] &= ~(termios.ICANON | termios.ECHO | termios.IEXTEN |
+                 termios.ISIG)
+    mode[6][termios.VMIN] = 1
+    mode[6][termios.VTIME] = 0
+
+    decoder = codecs.getincrementaldecoder("utf-8")("ignore")
+    with _LOCK:
+        if _cursor != "start":
+            _raw(_RST + "\n")
+        _input_buf = ""
+        _input_prompt = prompt
+        _input_live = True
+        _cursor = "other"
+        _raw("\n")
+        _draw_input()
+
+    line = ""
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, mode)
+        while True:
+            ch = os.read(fd, 1)
+            if not ch:                              # stdin closed
+                raise EOFError
+            b = ch[0]
+            if b in (0x0a, 0x0d):                   # Enter
+                break
+            if b == 0x03:                           # Ctrl-C
+                raise KeyboardInterrupt
+            if b == 0x04:                           # Ctrl-D
+                if not _input_buf:
+                    raise EOFError
+                continue                            # ignore mid-line
+            if b == 0x1b:                           # ESC — drop arrow/nav keys
+                _drain_escape(fd)
+                continue
+            if b in (0x08, 0x7f):                   # Backspace / Delete
+                with _LOCK:
+                    if _input_buf:
+                        _wipe_input()
+                        _input_buf = _input_buf[:-1]
+                        _draw_input()
+                continue
+            if b == 0x15:                           # Ctrl-U — kill whole line
+                with _LOCK:
+                    if _input_buf:
+                        _wipe_input()
+                        _input_buf = ""
+                        _draw_input()
+                continue
+            if b < 0x20:                            # other control bytes
+                continue
+            piece = decoder.decode(ch)              # buffers partial UTF-8
+            if piece:
+                with _LOCK:
+                    _input_buf += piece
+                    _raw(piece)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        with _LOCK:
+            line = _input_buf
+            _input_live = False
+            _input_buf = ""
+            _raw("\n")
+            _cursor = "start"
+    return line
 
 
 class Agent:
@@ -333,6 +527,12 @@ class Agent:
             if ln == "":
                 return                       # blank line
         with _LOCK:
+            if _input_live:
+                # user is mid-prompt: lift the input line, print, redraw it
+                _wipe_input()
+                _raw(f"{_GREEN}   xv6 ┃ {ln}{_RST}\n")
+                _draw_input()
+                return
             if _cursor != "xv6":
                 if _cursor == "other":
                     _raw("\n")
@@ -558,14 +758,10 @@ class Agent:
         info("  :ask <prompt>   one-shot via the kernel F9 cache (skips Solar on")
         info("                  a repeat/paraphrase hit). :role <name> tags it.")
         info("-" * 64)
+        prompt = f"{_BOLD}you ▸{_RST} "
         while True:
-            with _LOCK:
-                if _cursor != "start":
-                    _raw(_RST + "\n")
-                _raw(f"\n{_BOLD}you ▸{_RST} ")
-                _cursor = "other"
             try:
-                line = input()
+                line = _read_line(prompt)
             except (EOFError, KeyboardInterrupt):
                 with _LOCK:
                     _raw("\n")
