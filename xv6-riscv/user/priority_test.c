@@ -109,22 +109,22 @@ test_inheritance(void)
 }
 
 /*
- * Test 3: High-priority process completes before lower-priority ones
+ * Test 3: High-priority processes finish earlier on average than low ones.
  *
- * Fork 3 children with priorities HIGH(1), MED(10), LOW(19). Each child
- * burns identical CPU work then writes its label to a shared pipe just
- * before exit. The parent reads the pipe to recover the *actual* finish
- * order and asserts HIGH → MED → LOW.
+ * SMP-친화적 디자인: 자식 수(KIDS) 를 CPU 수(3) 보다 많게 두어 *강제 경쟁* 을
+ * 만든다. 자식 3 명이면 3-CPU 환경에서 각자 CPU 한 개씩 차지해 경쟁이 사라져
+ * 우선순위 효과가 측정 불가. 6 자식 (HIGH×2 / MED×2 / LOW×2) 으로 늘리면
+ * 항상 일부 자식이 runqueue 대기 → CFS 의 vruntime 가중치가 종료 순서로 드러남.
  *
- * Why a pipe (not wait()): wait() returns "any exited child" and its
- * ordering is implementation-defined when multiple children have already
- * exited. A pipe gives a hard happens-before edge: the byte arrives in
- * the order the children's write() syscalls were serialized.
+ * 검증: 종료 순서를 6 byte 의 pipe 로 받아, 각 priority 그룹의 평균 종료
+ * 인덱스를 계산. avg(H) < avg(M) < avg(L) 이면 CFS 가 우선순위를 존중한 것.
+ * 정수 비교를 위해 곱셈으로 회피 (avg = sum/n → sum1*n2 < sum2*n1).
  */
+#define KIDS 6
 static void
 test_scheduling_order(void)
 {
-  printf("--- Test 3: High-priority process runs first ---\n");
+  printf("--- Test 3: High-priority processes finish earlier on avg ---\n");
 
   int p[2];
   if (pipe(p) < 0) {
@@ -132,18 +132,16 @@ test_scheduling_order(void)
     exit(1);
   }
 
-  /* Make burn work big enough that scheduling effects dominate startup
-   * noise. Tuned by trial on smp=1; raise if Test 3 ever flakes. */
   const int WORK = 30000000;
 
-  struct { const char *label; int prio; char tag; } kids[] = {
-    { "LOW ",  19, 'L' },
-    { "MED ",  10, 'M' },
-    { "HIGH",   1, 'H' },
+  struct { const char *label; int prio; char tag; } kids[KIDS] = {
+    { "LOW0",  19, 'L' }, { "LOW1",  19, 'L' },
+    { "MED0",  10, 'M' }, { "MED1",  10, 'M' },
+    { "HI0 ",   1, 'H' }, { "HI1 ",   1, 'H' },
   };
 
-  /* Spawn LOW first so HIGH genuinely has to "overtake". */
-  for (int i = 0; i < 3; i++) {
+  /* LOW 부터 spawn — HIGH 가 "추월"해야 통과되도록. */
+  for (int i = 0; i < KIDS; i++) {
     int pid = fork();
     if (pid < 0) {
       printf("FAIL: fork failed\n");
@@ -154,40 +152,54 @@ test_scheduling_order(void)
       setpriority(getpid(), kids[i].prio);
       burn(WORK);
       write(p[1], &kids[i].tag, 1);
-      printf("[%s prio=%d] finished\n", kids[i].label, kids[i].prio);
       exit(0);
     }
   }
 
   close(p[1]);
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < KIDS; i++) {
     int status;
     wait(&status);
   }
 
-  char order[3] = {0};
+  char order[KIDS] = {0};
   int got = 0;
-  while (got < 3) {
-    int n = read(p[0], order + got, 3 - got);
+  while (got < KIDS) {
+    int n = read(p[0], order + got, KIDS - got);
     if (n <= 0) break;
     got += n;
   }
   close(p[0]);
 
-  if (got != 3) {
-    printf("FAIL: pipe returned %d bytes (expected 3)\n", got);
+  if (got != KIDS) {
+    printf("FAIL: pipe returned %d bytes (expected %d)\n", got, KIDS);
     exit(1);
   }
 
-  printf("Finish order: %c %c %c (expected: H M L)\n",
-         order[0], order[1], order[2]);
+  printf("Finish order: ");
+  for (int i = 0; i < KIDS; i++) printf("%c ", order[i]);
+  printf("(expected: H 들이 앞쪽, L 들이 뒤쪽)\n");
 
-  if (order[0] != 'H' || order[1] != 'M' || order[2] != 'L') {
-    printf("FAIL: CFS did not respect priority\n");
+  /* 그룹별 평균 종료 인덱스 (정수로 sum/count). */
+  int h_sum = 0, h_n = 0, m_sum = 0, m_n = 0, l_sum = 0, l_n = 0;
+  for (int i = 0; i < KIDS; i++) {
+    if      (order[i] == 'H') { h_sum += i; h_n++; }
+    else if (order[i] == 'M') { m_sum += i; m_n++; }
+    else if (order[i] == 'L') { l_sum += i; l_n++; }
+  }
+  if (h_n == 0 || m_n == 0 || l_n == 0) {
+    printf("FAIL: 그룹별 종료 카운트 누락 (H=%d M=%d L=%d)\n", h_n, m_n, l_n);
+    exit(1);
+  }
+  /* avg_H < avg_M < avg_L  ⇔  h_sum*m_n < m_sum*h_n  &&  m_sum*l_n < l_sum*m_n */
+  if (!(h_sum * m_n < m_sum * h_n && m_sum * l_n < l_sum * m_n)) {
+    printf("FAIL: CFS did not respect priority "
+           "(avg idx — H=%d/%d, M=%d/%d, L=%d/%d)\n",
+           h_sum, h_n, m_sum, m_n, l_sum, l_n);
     exit(1);
   }
 
-  printf("Test 3 PASSED\n\n");
+  printf("Test 3 PASSED (avg idx H<M<L)\n\n");
 }
 
 int
