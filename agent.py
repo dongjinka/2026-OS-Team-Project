@@ -396,7 +396,9 @@ def _read_line(prompt: str) -> str:
 
 
 class Agent:
-    def __init__(self, host="127.0.0.1", port=4444):
+    def __init__(self, host=None, port=None):
+        host = host or os.environ.get("XV6_HOST", "127.0.0.1")
+        port = int(port or os.environ.get("XV6_PORT", "4444"))
         self.host, self.port = host, port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -666,12 +668,13 @@ class Agent:
         return None
 
     def _cache_store(self, question: str, answer_text: str) -> None:
-        """Best-effort: store a no-tool answer so the next ask is a cache hit.
+        """Best-effort: store a no-impure-tool answer so the next ask hits.
 
-        Skipped for very short questions — those are usually context-dependent
-        follow-ups ("summarise that") whose answer must not be reused later."""
-        key = question.replace("\n", " ").replace("\r", " ")
-        if len(key.split()) < 3:
+        Skipped only for *very* short fragments (≤3 chars) — those are likely
+        context-dependent follow-ups ("y", "더?") whose answer would mis-hit
+        later. A short but complete question like "11+22?" is fine."""
+        key = question.replace("\n", " ").replace("\r", " ").strip()
+        if len(key) < 4:
             return
         # one wire line: collapse newlines so the value can't split the line.
         val = answer_text.replace("\r", "").replace("\n", "\\n")
@@ -699,6 +702,11 @@ class Agent:
 
         self.messages.append({"role": "user", "content": user_input})
         tools_used = 0
+        # chat/list/help 는 *시스템 상태와 무관* — wire 통로 또는 정적 문서 —
+        # 거쳐도 답이 stale 되지 않으므로 캐시 안전. ls/read/write/ps/nice/print
+        # 는 상태 의존 → 캐시 차단. impure 가 하나라도 섞였으면 캐시 X.
+        PURE_TOOLS = {"chat", "list", "help"}
+        used_impure = False
         for n in range(1, MAX_STEPS + 1):
             self._trim_history()
             reply = self._call_llm()
@@ -716,10 +724,11 @@ class Agent:
 
             if "answer" in reply:
                 answer(reply["answer"])
-                # option 2 — cache the answer ONLY if no tool ran: a tool /
-                # multi-step answer depends on live system state (files,
-                # processes) and would go stale. No tool ⇒ pure knowledge.
-                if tools_used == 0:
+                # option 2 — cache the answer if no *impure* tool ran. Solar 가
+                # 단순 산술/대화에도 chat 도구를 자주 부르는데, chat 은 wire
+                # 통로일 뿐 시스템 상태와 무관하므로 캐시 안전. ls/read/write
+                # 등 *상태 의존* 도구가 섞였을 때만 stale 위험 → 캐시 X.
+                if not used_impure:
                     self._cache_store(user_input, reply["answer"])
                 return
 
@@ -734,6 +743,8 @@ class Agent:
 
             step(n, tool, args)
             tools_used += 1
+            if tool not in PURE_TOOLS:
+                used_impure = True
             obs = self.run_tool(tool, args)
             self.messages.append({"role": "user",
                                    "content": f"OBSERVATION ({tool}):\n{obs}"})

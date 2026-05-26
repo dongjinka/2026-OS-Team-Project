@@ -1570,6 +1570,10 @@ you ▸
 
 **종료**: 터미널 B 에서 `Ctrl-D`. 그 다음 터미널 A 에서 `Ctrl-A x`.
 
+**다중 인스턴스**: 환경변수 `XV6_HOST` / `XV6_PORT` 로 접속 대상 변경 가능.
+회귀와 자연어 세션을 동시 띄울 때, qemu 를 5555 포트로 직접 띄운 뒤
+`XV6_PORT=5555 python3 agent.py` 형태로 사용 (Makefile 기본은 4444).
+
 ### 12.2 두 가지 입력 모드
 
 | 입력 형태 | 처리 경로 | 언제 쓰나 |
@@ -1628,19 +1632,25 @@ xv6 ┃ TODO 2
 
 #### ① 단순 산술 + 캐시 적중 시연
 ```
-you ▸ 11 + 22 는?
+you ▸ 11 + 22는 얼마인지 알려줘
    💭 산술 — 답은 33
 ╭─ answer ─╮
-│ 33 입니다.
+│ 11 + 22는 33입니다.
 ╰──────────╯
 
-you ▸ 11 + 22 는?          ← 같은 prompt 반복
+you ▸ 11 + 22는 얼마인지 알려줘    ← 같은 prompt 반복
 [cache HIT] answer reused from kernel F9 cache (Solar not called)
 ╭─ answer ─╮
-│ 33 입니다.
+│ 11 + 22는 33입니다.
 ╰──────────╯
 ```
 **PASS 기준**: 두 번째 호출에서 `[cache HIT]` 표시 + Solar 호출 안 됨.
+
+> **캐시가 안 잡히는 경우 ⚠️**
+> 두 가드가 *동시에* 통과해야 캐시 저장됨 (`agent.py:_cache_store`, `handle`):
+> 1. **길이 가드**: prompt 의 공백 제거 후 `len >= 4` 여야 함. `"3+3?"` 같이 너무 짧으면 *컨텍스트 의존 follow-up* 으로 간주되어 skip.
+> 2. **도구 가드**: ReAct 루프에서 *상태-의존* 도구 (`ls`/`read`/`write`/`ps`/`nice`/`print`) 가 한 번이라도 사용되면 캐시 X. *순수* 도구 (`chat`/`list`/`help`) 만 사용했거나 도구 미사용이면 캐시 O.
+> Solar 가 단순 답변에도 `chat` 도구를 자주 부르는데, 이 경우는 *순수 도구* 라 캐시 저장됨 (이번 세션에서 가드 완화).
 
 #### ② 파일 목록 (1-step LS)
 ```
@@ -1735,12 +1745,13 @@ python3 agent.py
 | `kill` / `exec` | jail 의 `agent_blocked()` 가 거부 | 정상 동작 — 보안 가드 |
 | `nice` 음수 priority | 커널에서 거부 | 사용자급 priority 만 |
 | 비밀 정보 | prompt 가 xv6 콘솔에도 찍힘 | 패스워드/토큰 입력 금지 |
+| 캐시 영속성 | `/cache.bin` 이 xv6 fs.img 안에 영구 저장 — qemu 재시작 만으로는 안 비워짐 | 진짜 클린은 `make -C xv6-riscv clean && make -C xv6-riscv qemu-agent` (`fs.img` 재생성) |
 
 ### 12.8 디버깅 팁
 
 - **응답이 안 옴**: 터미널 A 의 qemu 가 살아 있는지 (`ps aux | grep qemu`). agent.py 가 `[bridge] connected to 127.0.0.1:4444` 출력했는지.
 - **`mode: mock` 인데 의도와 다름**: `.env` 의 `UPSTAGE_API_KEY` 가 비어 있거나, `pip install openai` 가 안 됐을 가능성.
-- **`[cache HIT]` 가 안 보임**: 같은 prompt 를 두 번 보냈는데도 두 번째에 안 뜨면, `:ask` 가 아닌 평문이라 호스트 캐시만 (kernel F9 미사용). `:ask` 로 다시 시도.
+- **`[cache HIT]` 가 안 보임**: 두 가지 흔한 원인 — (1) 평문 경로의 가드 (길이 ≥ 4 글자 & impure 도구 미사용) 미통과. (2) `make clean` 안 한 다른 터미널의 *이전 fs.img 의 `/cache.bin`* 이 살아 있는 경우는 *반대로 항상* hit 가 뜸. 진짜 fresh 상태에서 검증하려면 `make -C xv6-riscv clean && make -C xv6-riscv qemu-agent` 후 다른 포트 (`XV6_PORT=5555`) 로 격리하거나, 게스트 안에서 `ls /cache.bin` 확인.
 - **`unknown cmd` 가 보임**: LLM 이 표 12.3 외의 verb 를 만들어냄 → 보통 한두 번 재시도하면 정상.
 - **회귀 하네스와 동시 실행 불가**: 둘 다 4444 포트를 쓰므로 동시 실행 안 됨. `pkill -9 qemu-system-riscv64` 로 정리 후 한쪽씩.
 
