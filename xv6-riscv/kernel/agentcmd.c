@@ -372,6 +372,21 @@ handle_cache_set(char *arg)
   printf("%s\n", (rc == 0) ? "RESP|OK" : "RESP|ERR");
 }
 
+// CONFIRM_RES|<pid>|y    또는   CONFIRM_RES|<pid>|n
+// 호스트 사용자의 jail confirm-escape 응답. confirm.c 의 pending 요청을 깨움.
+static void
+handle_confirm_res(char *arg)
+{
+  // pid 파싱
+  char *p = arg;
+  int pid = 0;
+  while(*p >= '0' && *p <= '9'){ pid = pid*10 + (*p - '0'); p++; }
+  if(*p != '|' || pid <= 0) return;
+  p++;
+  int allow = (*p == 'y' || *p == 'Y') ? 1 : 0;
+  confirm_resolve(pid, allow);
+}
+
 // ───────────────── stage-1 enqueue (interrupt-safe) ─────────────────
 // console.c calls this for each "REQ|" line it sniffs from the serial port.
 // Interrupt context — only spinlock-protected enqueue, never sleeps.
@@ -455,10 +470,11 @@ agent_dispatch_now(char *line)
   }
 
   // Meta commands — in-kernel, never reach agentd or the deny list.
-  if(str_eq(cmd, "ASK"))       { handle_ask(arg);       return; }
-  if(str_eq(cmd, "LLM_RESP"))  { handle_llm_resp(arg);  return; }
-  if(str_eq(cmd, "CACHE_GET")) { handle_cache_get(arg); return; }
-  if(str_eq(cmd, "CACHE_SET")) { handle_cache_set(arg); return; }
+  if(str_eq(cmd, "ASK"))         { handle_ask(arg);         return; }
+  if(str_eq(cmd, "LLM_RESP"))    { handle_llm_resp(arg);    return; }
+  if(str_eq(cmd, "CACHE_GET"))   { handle_cache_get(arg);   return; }
+  if(str_eq(cmd, "CACHE_SET"))   { handle_cache_set(arg);   return; }
+  if(str_eq(cmd, "CONFIRM_RES")) { handle_confirm_res(arg); return; }
 
   // F7: hard sandbox boundary — denied commands never reach the agent runtime.
   if(deny_listed(cmd)){

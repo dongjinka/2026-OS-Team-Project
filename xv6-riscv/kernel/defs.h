@@ -111,6 +111,11 @@ void            deny_reset(void);
 void            deny_clear(void);
 int             deny_snapshot(char *, int);
 
+// confirm.c — jail Confirm-Escape (호스트 사용자 일회 허용/거부)
+void            confirminit(void);
+int             confirm_request(int call_num, const char *summary);
+void            confirm_resolve(int pid, int allow);
+
 // cache.c
 void            cacheinit(void);
 int             cache_get(const char *key, int klen, char *valbuf, int vbuflen);

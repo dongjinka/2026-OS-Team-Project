@@ -155,6 +155,24 @@ agent_blocked(int num)
   return num == SYS_exec || num == SYS_kill || num == SYS_mknod;
 }
 
+// 차단된 syscall 의 호스트-가시 한 줄 요약.
+// 보안 검토 단계에서 사람이 *무엇을* 허용하는지 알 수 있도록 인자 핵심만.
+static void
+agent_call_summary(int num, char *buf, int buflen)
+{
+  const char *name = "unknown";
+  switch(num){
+    case SYS_exec:  name = "exec";  break;
+    case SYS_kill:  name = "kill";  break;
+    case SYS_mknod: name = "mknod"; break;
+  }
+  // 인자 자세히는 syscall arg 디코딩이 필요 — v1 은 syscall 이름만.
+  // (a0 인자 디코드는 argaddr/argstr 가 호출자 컨텍스트 종속이라 생략.)
+  int i = 0;
+  while(name[i] && i < buflen - 1){ buf[i] = name[i]; i++; }
+  buf[i] = 0;
+}
+
 void
 syscall(void)
 {
@@ -163,12 +181,21 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    // F7 sandbox: a jailed agent process is refused dangerous syscalls.
+    // F7 sandbox + Confirm-Escape: jail 안 agent 가 위험 syscall 을 호출하면
+    // 무조건 거부하지 않고, 호스트 사용자에게 *일회 허용/거부* 를 묻는다.
+    // 5초 안에 응답 없으면 자동 거부 (안전 기본값).
     if(p->is_agent && agent_blocked(num)){
-      printf("[sandbox] pid %d (%s): syscall %d blocked\n",
+      char summary[32];
+      agent_call_summary(num, summary, sizeof summary);
+      if(!confirm_request(num, summary)){
+        printf("[sandbox] pid %d (%s): syscall %d blocked (confirm: deny/timeout)\n",
+               p->pid, p->name, num);
+        p->trapframe->a0 = -1;
+        return;
+      }
+      printf("[sandbox] pid %d (%s): syscall %d allowed (confirm: y)\n",
              p->pid, p->name, num);
-      p->trapframe->a0 = -1;
-      return;
+      // fall through — 정상 dispatch
     }
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0

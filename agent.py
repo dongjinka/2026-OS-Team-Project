@@ -506,6 +506,13 @@ class Agent:
                     threading.Thread(target=self._handle_llm_req,
                                      args=(prompt,), daemon=True).start()
                     continue
+                # jail Confirm-Escape — 게스트의 위험 syscall 차단 시도가
+                # `CONFIRM_REQ|<pid>|<call>|<summary>` 를 보냄. 사용자에게
+                # 일회 허용/거부를 묻고 `CONFIRM_RES` 로 회신.
+                if ln.startswith("CONFIRM_REQ|"):
+                    threading.Thread(target=self._handle_confirm_req,
+                                     args=(ln,), daemon=True).start()
+                    continue
                 # kernel F9 cache reply — hand it to the waiting _cache_rpc().
                 if ln.startswith("RESP|"):
                     with self._resp_lock:
@@ -639,6 +646,28 @@ class Agent:
         # the embedded text can't split the LLM_RESP line on the kernel side.
         wire = self._translate(prompt).replace("\n", " ").replace("\r", " ")
         self._send(f"REQ|LLM_RESP|{wire}")
+
+    def _handle_confirm_req(self, line: str) -> None:
+        """게스트가 위험 syscall 차단 시도 시 보낸 CONFIRM_REQ 라인을 받아
+        사용자에게 y/N 을 묻고 CONFIRM_RES 로 회신. 5초 안에 응답 없으면
+        커널 측 timeout 으로 자동 거부됨."""
+        # `CONFIRM_REQ|<pid>|<call>|<summary>` — call/summary 둘 다 있을 수 있고
+        # summary 가 비어 있을 수도. split 결과 길이가 3 또는 4.
+        parts = line.rstrip("\r\n").split("|", 3)
+        if len(parts) < 3:
+            return
+        pid = parts[1]
+        call = parts[2]
+        summary = parts[3] if len(parts) >= 4 else ""
+        prompt = (f"\n[jail] pid={pid} 가 위험 syscall '{summary or call}' 호출 요청 "
+                  f"— 5초 내 허용? (y/N) ")
+        try:
+            ans = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        allow = "y" if ans.strip().lower().startswith("y") else "n"
+        self._send(f"REQ|agent:host|CONFIRM_RES|{pid}|{allow}")
+        info(f"[bridge] CONFIRM_RES → pid={pid} {allow}")
 
     # ---------- option 2: whole-answer reuse via the kernel F9 cache ----------
 

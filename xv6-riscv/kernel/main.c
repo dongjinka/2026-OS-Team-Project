@@ -30,6 +30,7 @@ main()
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     cacheinit();     // LLM response cache (F9) — locks only; disk I/O is lazy
+    confirminit();   // jail Confirm-Escape (sleep/wakeup 채널 + pending state)
     userinit();      // first user process
     __sync_synchronize();
     started = 1;
