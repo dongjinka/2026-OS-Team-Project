@@ -6,10 +6,35 @@
 
 static char digits[] = "0123456789ABCDEF";
 
+// vprintf 한 호출의 출력을 줄 단위로 모아 단일 write() 로 내보내기 위한
+// process-local 버퍼. fork 자식은 부모 메모리를 복사 받으므로 process 별로
+// 독립. xv6 user 는 process 당 single thread → race 없음.
+#define PRINTF_BUFSZ 256
+static char pbuf[PRINTF_BUFSZ];
+static int  pbuf_len = 0;
+static int  pbuf_fd  = -1;
+
+static void
+pflush(void)
+{
+  if(pbuf_len > 0 && pbuf_fd >= 0){
+    write(pbuf_fd, pbuf, pbuf_len);
+    pbuf_len = 0;
+  }
+}
+
 static void
 putc(int fd, char c)
 {
-  write(fd, &c, 1);
+  // 다른 fd 로 출력하거나 버퍼 풀이면 우선 flush.
+  if(fd != pbuf_fd || pbuf_len >= PRINTF_BUFSZ){
+    pflush();
+    pbuf_fd = fd;
+  }
+  pbuf[pbuf_len++] = c;
+  // 줄바꿈 시 즉시 flush — 한 줄을 단일 write 로 보내 byte-race 차단.
+  if(c == '\n')
+    pflush();
 }
 
 static void
@@ -111,6 +136,8 @@ vprintf(int fd, const char *fmt, va_list ap)
       state = 0;
     }
   }
+  // 호출 끝나면 남은 잔여물도 flush — 줄바꿈 없는 짧은 printf 도 한 번에 나감.
+  pflush();
 }
 
 void

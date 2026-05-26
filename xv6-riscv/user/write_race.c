@@ -12,7 +12,9 @@
 #include "user/user.h"
 
 #define WRITERS 4
-#define SHARED  "/shared.txt"
+// 파일명을 일반적인 /shared.txt 가 아닌 wr_ prefix 로 — agentd 가 다른 경로로
+// 같은 이름을 만지는 통합 충돌 가능성을 차단.
+#define SHARED  "/wr_shared.txt"
 
 static int
 itoa(int n, char *out)
@@ -62,7 +64,18 @@ main(void)
   int t_done = uptime();
   printf("=== all writers exited — wall=%d ticks\n", t_done - t_launch);
 
-  int fd = open(SHARED, 0);
+  // dispatch() 는 큐에 enqueue 만 하고 즉시 리턴하므로, 자식 종료 시점에
+  // agentd 는 아직 마지막 WRITE 트랜잭션을 처리 중일 수 있다.
+  // user-space 의 sleep 시스템콜이 없으므로 uptime() polling 으로 백오프 +
+  // 재시도하여 inode 충돌이 풀릴 때까지 기다린다.
+  int fd = -1;
+  for(int retry = 0; retry < 30 && fd < 0; retry++){
+    fd = open(SHARED, 0);
+    if(fd < 0){
+      int t_wait_until = uptime() + 2;        // 약 200ms 백오프
+      while(uptime() < t_wait_until) { }
+    }
+  }
   if(fd < 0){ printf("can't open %s\n", SHARED); exit(1); }
   char buf[1024];
   int n = read(fd, buf, sizeof(buf) - 1);

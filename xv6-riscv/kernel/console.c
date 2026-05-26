@@ -53,6 +53,11 @@ struct {
   uint e;  // Edit index
 } cons;
 
+// 단일 write() 시스템콜이 atomic 하게 콘솔에 나가도록 직렬화하는 sleeplock.
+// (cons.lock 은 input edit/echo 까지 잡고 있어서 write 와 같은 락을 쓰면 입력
+// 처리 deadlock 위험. write 전용 sleeplock 으로 분리.)
+static struct sleeplock conswr_lock;
+
 // Mirror buffer for sniffing agent commands. Holds the chars of the line
 // currently being typed (between cons.w and cons.e). On newline, if the line
 // starts with "REQ|" it is consumed by agent_dispatch and hidden from the
@@ -71,6 +76,10 @@ consolewrite(int user_src, uint64 src, int n)
   char buf[32]; // move batches from user space to uart.
   int i = 0;
 
+  // 한 번의 write() 호출이 통째로 콘솔에 나가도록 sleeplock 으로 직렬화.
+  // 그렇지 않으면 동시 printf 한 부모/자식들의 출력이 char 단위로 byte-race.
+  acquiresleep(&conswr_lock);
+
   while(i < n){
     int nn = sizeof(buf);
     if(nn > n - i)
@@ -81,6 +90,7 @@ consolewrite(int user_src, uint64 src, int n)
     i += nn;
   }
 
+  releasesleep(&conswr_lock);
   return i;
 }
 
@@ -225,6 +235,7 @@ void
 consoleinit(void)
 {
   initlock(&cons.lock, "cons");
+  initsleeplock(&conswr_lock, "conswr");
 
   uartinit();
 
