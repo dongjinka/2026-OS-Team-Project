@@ -396,7 +396,9 @@ def _read_line(prompt: str) -> str:
 
 
 class Agent:
-    def __init__(self, host="127.0.0.1", port=4444):
+    def __init__(self, host=None, port=None):
+        host = host or os.environ.get("XV6_HOST", "127.0.0.1")
+        port = int(port or os.environ.get("XV6_PORT", "4444"))
         self.host, self.port = host, port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -504,6 +506,13 @@ class Agent:
                     threading.Thread(target=self._handle_llm_req,
                                      args=(prompt,), daemon=True).start()
                     continue
+                # jail Confirm-Escape — 게스트의 위험 syscall 차단 시도가
+                # `CONFIRM_REQ|<pid>|<call>|<summary>` 를 보냄. 사용자에게
+                # 일회 허용/거부를 묻고 `CONFIRM_RES` 로 회신.
+                if ln.startswith("CONFIRM_REQ|"):
+                    threading.Thread(target=self._handle_confirm_req,
+                                     args=(ln,), daemon=True).start()
+                    continue
                 # kernel F9 cache reply — hand it to the waiting _cache_rpc().
                 if ln.startswith("RESP|"):
                     with self._resp_lock:
@@ -565,12 +574,27 @@ class Agent:
         self._send("REQ|" + wire)
         self._send(marker_echo)
 
-        deadline = time.time() + 12
-        while time.time() < deadline:
-            with self.cap_lock:
-                if marker_out in self.capture_buf:
-                    break
-            time.sleep(0.05)
+        # Wait up to 24 s for the marker. agentd processes the queue
+        # serially — if a heavy prior request (write_race-style dispatch,
+        # a long file write, …) is still draining, our marker can sit in
+        # the queue past the old 12 s budget. 24 s covers a generous tail.
+        def wait_for_marker(seconds: float) -> bool:
+            d = time.time() + seconds
+            while time.time() < d:
+                with self.cap_lock:
+                    if marker_out in self.capture_buf:
+                        return True
+                time.sleep(0.05)
+            return False
+
+        found = wait_for_marker(24.0)
+        if not found:
+            # one-shot retry: resend just the marker — agentd may have
+            # processed the real wire by now but the marker request itself
+            # was dropped (line truncation, wire race, …). Another 12 s.
+            self._send(marker_echo)
+            found = wait_for_marker(12.0)
+
         with self.cap_lock:
             self.capturing = False
             buf = self.capture_buf
@@ -638,6 +662,28 @@ class Agent:
         wire = self._translate(prompt).replace("\n", " ").replace("\r", " ")
         self._send(f"REQ|LLM_RESP|{wire}")
 
+    def _handle_confirm_req(self, line: str) -> None:
+        """게스트가 위험 syscall 차단 시도 시 보낸 CONFIRM_REQ 라인을 받아
+        사용자에게 y/N 을 묻고 CONFIRM_RES 로 회신. 5초 안에 응답 없으면
+        커널 측 timeout 으로 자동 거부됨."""
+        # `CONFIRM_REQ|<pid>|<call>|<summary>` — call/summary 둘 다 있을 수 있고
+        # summary 가 비어 있을 수도. split 결과 길이가 3 또는 4.
+        parts = line.rstrip("\r\n").split("|", 3)
+        if len(parts) < 3:
+            return
+        pid = parts[1]
+        call = parts[2]
+        summary = parts[3] if len(parts) >= 4 else ""
+        prompt = (f"\n[jail] pid={pid} 가 위험 syscall '{summary or call}' 호출 요청 "
+                  f"— 5초 내 허용? (y/N) ")
+        try:
+            ans = input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        allow = "y" if ans.strip().lower().startswith("y") else "n"
+        self._send(f"REQ|agent:host|CONFIRM_RES|{pid}|{allow}")
+        info(f"[bridge] CONFIRM_RES → pid={pid} {allow}")
+
     # ---------- option 2: whole-answer reuse via the kernel F9 cache ----------
 
     def _cache_rpc(self, wire: str, timeout: float = 4.0):
@@ -666,12 +712,13 @@ class Agent:
         return None
 
     def _cache_store(self, question: str, answer_text: str) -> None:
-        """Best-effort: store a no-tool answer so the next ask is a cache hit.
+        """Best-effort: store a no-impure-tool answer so the next ask hits.
 
-        Skipped for very short questions — those are usually context-dependent
-        follow-ups ("summarise that") whose answer must not be reused later."""
-        key = question.replace("\n", " ").replace("\r", " ")
-        if len(key.split()) < 3:
+        Skipped only for *very* short fragments (≤3 chars) — those are likely
+        context-dependent follow-ups ("y", "더?") whose answer would mis-hit
+        later. A short but complete question like "11+22?" is fine."""
+        key = question.replace("\n", " ").replace("\r", " ").strip()
+        if len(key) < 4:
             return
         # one wire line: collapse newlines so the value can't split the line.
         val = answer_text.replace("\r", "").replace("\n", "\\n")
@@ -699,6 +746,11 @@ class Agent:
 
         self.messages.append({"role": "user", "content": user_input})
         tools_used = 0
+        # chat/list/help 는 *시스템 상태와 무관* — wire 통로 또는 정적 문서 —
+        # 거쳐도 답이 stale 되지 않으므로 캐시 안전. ls/read/write/ps/nice/print
+        # 는 상태 의존 → 캐시 차단. impure 가 하나라도 섞였으면 캐시 X.
+        PURE_TOOLS = {"chat", "list", "help"}
+        used_impure = False
         for n in range(1, MAX_STEPS + 1):
             self._trim_history()
             reply = self._call_llm()
@@ -716,10 +768,11 @@ class Agent:
 
             if "answer" in reply:
                 answer(reply["answer"])
-                # option 2 — cache the answer ONLY if no tool ran: a tool /
-                # multi-step answer depends on live system state (files,
-                # processes) and would go stale. No tool ⇒ pure knowledge.
-                if tools_used == 0:
+                # option 2 — cache the answer if no *impure* tool ran. Solar 가
+                # 단순 산술/대화에도 chat 도구를 자주 부르는데, chat 은 wire
+                # 통로일 뿐 시스템 상태와 무관하므로 캐시 안전. ls/read/write
+                # 등 *상태 의존* 도구가 섞였을 때만 stale 위험 → 캐시 X.
+                if not used_impure:
                     self._cache_store(user_input, reply["answer"])
                 return
 
@@ -734,6 +787,8 @@ class Agent:
 
             step(n, tool, args)
             tools_used += 1
+            if tool not in PURE_TOOLS:
+                used_impure = True
             obs = self.run_tool(tool, args)
             self.messages.append({"role": "user",
                                    "content": f"OBSERVATION ({tool}):\n{obs}"})

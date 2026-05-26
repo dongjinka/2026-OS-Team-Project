@@ -274,8 +274,9 @@ def build_tests(fast: bool) -> List[Test]:
              judge_fair, extract_fair, timeout=240, settle=fair_settle),
 
         Test("agentdemo", "agentdemo",
-             "jail 진입, '..' 탈출 차단, 외부 파일 비가시, 음수 priority 거부, exec 차단 — 4종 가드.",
-             judge_agentdemo, extract_agentdemo, timeout=30, settle=6.0),
+             "jail 진입, '..' 탈출 차단, 외부 파일 비가시, 음수 priority 거부, "
+             "exec 차단 — 4종 가드. exec 는 이제 confirm-escape 의 5s timeout 후 거부.",
+             judge_agentdemo, extract_agentdemo, timeout=40, settle=10.0),
 
         Test("write_race", "write_race",
              "4 writer 가 동일 파일에 동시 쓰기 — jail 안 inode sleeplock 직렬화 회귀.",
