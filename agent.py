@@ -574,12 +574,27 @@ class Agent:
         self._send("REQ|" + wire)
         self._send(marker_echo)
 
-        deadline = time.time() + 12
-        while time.time() < deadline:
-            with self.cap_lock:
-                if marker_out in self.capture_buf:
-                    break
-            time.sleep(0.05)
+        # Wait up to 24 s for the marker. agentd processes the queue
+        # serially — if a heavy prior request (write_race-style dispatch,
+        # a long file write, …) is still draining, our marker can sit in
+        # the queue past the old 12 s budget. 24 s covers a generous tail.
+        def wait_for_marker(seconds: float) -> bool:
+            d = time.time() + seconds
+            while time.time() < d:
+                with self.cap_lock:
+                    if marker_out in self.capture_buf:
+                        return True
+                time.sleep(0.05)
+            return False
+
+        found = wait_for_marker(24.0)
+        if not found:
+            # one-shot retry: resend just the marker — agentd may have
+            # processed the real wire by now but the marker request itself
+            # was dropped (line truncation, wire race, …). Another 12 s.
+            self._send(marker_echo)
+            found = wait_for_marker(12.0)
+
         with self.cap_lock:
             self.capturing = False
             buf = self.capture_buf
