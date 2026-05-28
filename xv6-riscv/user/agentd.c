@@ -43,6 +43,7 @@ static struct fn table[] = {
   { "SETPRIO", 1,  5, "SETPRIO|<FN>:<prio 0..20>" },
   { "PS",      1,  8, "PS|" },
   { "HELP",    1,  0, "HELP|" },
+  { "SPAWN",   1, 10, "SPAWN|<bin>|<argv space-separated>" },
 };
 #define NFN ((int)(sizeof(table) / sizeof(table[0])))
 
@@ -66,11 +67,32 @@ parsei(const char *s, int *out)
   return 0;
 }
 
+// Wire payload unescape — agent.py's `_wire_escape` swaps embedded newlines
+// for the literal two-char sequence "\n" so the wire stays single-line.
+// Walk the buffer in-place: every '\' + 'n' collapses into a real '\n'; every
+// other '\' is passed through unchanged. Output length ≤ input length.
+static void
+unescape_inplace(char *s)
+{
+  char *r = s;
+  char *w = s;
+  while(*r){
+    if(*r == '\\' && *(r+1) == 'n'){
+      *w++ = '\n';
+      r += 2;
+    } else {
+      *w++ = *r++;
+    }
+  }
+  *w = 0;
+}
+
 // ───────────────────────── command handlers ─────────────────────────
 
 static void
 do_print(char *arg)
 {
+  unescape_inplace(arg);
   printf("[agentd] %s\n", arg);
 }
 
@@ -79,6 +101,7 @@ do_print(char *arg)
 static void
 do_chat(char *arg)
 {
+  unescape_inplace(arg);
   printf("[chat] %s\n", arg);
 }
 
@@ -108,6 +131,7 @@ do_write(char *arg)
   if(*c != ':'){ printf("[agentd] WRITE: expected <file>:<data>\n"); return; }
   *c = 0;
   char *data = c + 1;
+  unescape_inplace(data);
 
   int fd = open(arg, O_CREATE | O_RDWR);
   if(fd < 0){
@@ -265,6 +289,61 @@ do_help(char *arg)
            table[i].priority);
 }
 
+// SPAWN <bin>|<argv space-separated> — fork+exec a binary inside the sandbox.
+// agentd 가 직접 exec 호출하면 자기 자신이 죽음 → 반드시 fork. 자식이
+// is_agent=1 을 상속 (proc.c fork) 하므로 exec() 가 confirm-escape 게이트를
+// trip → 호스트 사용자의 y/N 응답 후 실제 exec 또는 거부.
+//
+// 와이어 포맷: "<bin>|<argv0> <argv1> ..."  (argv 가 공백 분리). argv 가 비면
+// argv = [bin].  argv 최대 8 개 (간단 한계 — 대부분 셸 명령 충분).
+static void
+do_spawn(char *arg)
+{
+  // split bin | argv
+  char *c = arg;
+  while(*c && *c != '|') c++;
+  if(*c != '|'){
+    // 무 | 인자 = argv 가 비어 있는 형태 (bin 만). argv = [bin].
+    char *argv[2] = { arg, 0 };
+    int pid = fork();
+    if(pid < 0){ printf("[agentd] SPAWN: fork failed\n"); return; }
+    if(pid == 0){ exec(arg, argv); printf("[agentd] SPAWN: exec %s failed\n", arg); exit(1); }
+    int st = 0; wait(&st);
+    printf("[agentd] SPAWN %s done (status=%d)\n", arg, st);
+    return;
+  }
+  *c = 0;
+  char *bin  = arg;
+  char *args = c + 1;
+
+  // tokenize argv on space
+  char *argv[9];
+  int argc = 0;
+  argv[argc++] = bin;          // argv[0] convention
+  char *t = args;
+  while(*t && argc < 8){
+    while(*t == ' ') t++;
+    if(!*t) break;
+    argv[argc++] = t;
+    while(*t && *t != ' ') t++;
+    if(*t == ' '){ *t = 0; t++; }
+  }
+  argv[argc] = 0;
+
+  int pid = fork();
+  if(pid < 0){ printf("[agentd] SPAWN: fork failed\n"); return; }
+  if(pid == 0){
+    // child — is_agent / jail_root inherited (proc.c fork). exec trips
+    // confirm-escape per syscall.c agent_blocked branch.
+    exec(bin, argv);
+    printf("[agentd] SPAWN: exec %s failed\n", bin);
+    exit(1);
+  }
+  int st = 0;
+  wait(&st);
+  printf("[agentd] SPAWN %s done (status=%d)\n", bin, st);
+}
+
 // ───────────────────────────── dispatch ─────────────────────────────
 
 static void
@@ -299,18 +378,52 @@ execute(char *line)
       else if(streq(cmd, "SETPRIO")) do_setprio(arg);
       else if(streq(cmd, "PS"))      do_ps(arg);
       else if(streq(cmd, "HELP"))    do_help(arg);
+      else if(streq(cmd, "SPAWN"))   do_spawn(arg);
       return;
     }
   }
   printf("[agentd] unknown cmd '%s'\n", cmd);
 }
 
+// jail 진입 직전에 자주 쓰는 user 바이너리들을 /agentbox/ 로 hard-link.
+// 이렇게 해야 spawn'd 자식 (jail 안) 의 exec 가 binary 를 lookup 할 때
+// namex() 가 jail_root 안에서 찾을 수 있다. /agentbox 가 비어 있으면 모든
+// exec 시도가 -1 — 사용자 입장에선 "echo 가 안 돌아간다" 처럼 보임.
+//
+// 멱등 — link() 가 이미 있는 dst 에 대해 -1 반환하지만 무해 (이전 부팅의
+// fs.img 가 그대로 살아 있을 수 있음).
+static void
+populate_jail(void)
+{
+  static const char *bins[] = {
+    "echo", "cat", "ls", "wc", "grep",
+    "mkdir", "rm", "ln", "kill",
+    "sh",            // LLM often picks `sh -c "..."` — needs to be reachable
+    0
+  };
+  for(int i = 0; bins[i]; i++){
+    char src[32], dst[64];
+    int j = 0;
+    src[j++] = '/';
+    for(int k = 0; bins[i][k]; k++) src[j++] = bins[i][k];
+    src[j] = 0;
+    j = 0;
+    for(int k = 0; JAIL[k]; k++) dst[j++] = JAIL[k];
+    dst[j++] = '/';
+    for(int k = 0; bins[i][k]; k++) dst[j++] = bins[i][k];
+    dst[j] = 0;
+    link(src, dst);   // ignore EEXIST — idempotent across reboots
+  }
+}
+
 int
 main(void)
 {
-  // Ensure the jail directory exists, then confine ourselves to it.
-  // (mkdir must happen before jail() — afterward '/' is the jail root.)
+  // Ensure the jail directory exists, populate it with the bin set the LLM
+  // is allowed to spawn, then confine ourselves to it.
+  // (mkdir + link must happen before jail() — afterward '/' is the jail root.)
   mkdir(JAIL);
+  populate_jail();
   if(jail(JAIL) < 0){
     printf("[agentd] FATAL: jail(%s) failed\n", JAIL);
     exit(1);

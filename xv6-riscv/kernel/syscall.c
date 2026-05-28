@@ -181,17 +181,22 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    // F7 sandbox: jail 안 agent 가 위험 syscall 호출 시 무조건 거부.
-    // (TODO: confirm-escape 메커니즘은 kerneltrap panic 의심으로 임시 비활성화.
-    //  confirm.c / agentcmd CONFIRM_RES handler / agent.py _handle_confirm_req
-    //  는 모듈로 남아 있으니 panic 원인 파악 후 다시 활성화 예정.)
+    // F7 sandbox + confirm-escape: jail 안 agent 가 위험 syscall (exec/kill/
+    // mknod) 호출 시 confirm_request() 로 호스트 사용자에게 1회 허용을 묻는다.
+    // 호스트가 "y" 응답하면 통상 syscall 디스패치, "n" 또는 timeout 이면 거부.
+    // (v2 sleep/wakeup 기반 — confirm.c 노트 참고.)
     if(p->is_agent && agent_blocked(num)){
-      printf("[sandbox] pid %d (%s): syscall %d blocked\n",
-             p->pid, p->name, num);
-      p->trapframe->a0 = -1;
-      return;
+      char summary[32];
+      agent_call_summary(num, summary, sizeof(summary));
+      int allowed = confirm_request(num, summary);
+      if(!allowed){
+        printf("[sandbox] pid %d (%s): syscall %d denied (confirm-escape)\n",
+               p->pid, p->name, num);
+        p->trapframe->a0 = -1;
+        return;
+      }
+      // approved — fall through to 통상 syscall 디스패치.
     }
-    (void)agent_call_summary;     // 위 분기에서 더 이상 안 부르지만 prototype 보존
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
     p->trapframe->a0 = syscalls[num]();

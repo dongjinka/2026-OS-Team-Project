@@ -115,6 +115,7 @@ int             deny_snapshot(char *, int);
 void            confirminit(void);
 int             confirm_request(int call_num, const char *summary);
 void            confirm_resolve(int pid, int allow);
+void            confirm_tick(void);
 
 // cache.c
 void            cacheinit(void);

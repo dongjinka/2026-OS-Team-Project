@@ -660,6 +660,28 @@ RAM은 빠르지만 작다(16칸). 꽉 차면 어떻게 할까?
 
 ### 7.4 LRU 스왑 — 디스크로 밀어내기
 
+> **용어 명확화 — "슬롯" 이 뭔가**
+>
+> 본 절의 "슬롯" 은 OS 교재의 *physical frame* (4 KB 물리 메모리 블록) 이나
+> *virtual page* 와 **무관**합니다. 캐시 테이블 배열의 *한 칸* — 즉
+> `cache_ram[]` 배열의 인덱스 한 개 — 을 말합니다.
+>
+> ```c
+> #define CACHE_SLOTS 16
+> static struct cache_entry cache_ram[CACHE_SLOTS];   // ← 16 칸짜리 배열
+> //                          ↑↑↑↑↑↑↑↑↑↑↑↑
+> //              한 "슬롯" = 이 배열의 한 인덱스 = cache_entry 1 개
+> ```
+>
+> 한 슬롯의 크기는 약 **1.5 KB** (hash 8 B + last_access 4 B + vlen/has_sig
+> 4 B + sig[64] 512 B + val[1024] 1024 B + 패딩). 전체 캐시 = 1.5 KB × 16 ≈
+> **24 KB 의 커널 .bss 정적 영역**. 페이지테이블 매핑 없음, 4 KB 정렬 없음,
+> swap-out 시 *디스크 파일 `/cache.bin` 의 append 영역* 으로 가지 가상 메모리
+> swap 영역으로 가지 않음.
+>
+> xv6 본체는 데맨드 페이징/페이지 스왑 자체가 없어 page-level LRU 도 없음 —
+> 본 프로젝트의 LRU 는 오직 *F9 응답 캐시의 항목 교체* 정책 한 곳뿐입니다.
+
 RAM이 꽉 찬 상태에서 새 항목을 저장하려면, 기존 항목 하나를 빼야 한다.
 **LRU(Least Recently Used)** 정책: "가장 오래 안 쓴 항목"을 골라 **디스크 파일로
 옮기고**(swap out), 그 자리에 새 항목을 넣는다.
@@ -669,6 +691,200 @@ RAM이 꽉 찬 상태에서 새 항목을 저장하려면, 기존 항목 하나�
 건 디스크에 — 자동으로 정리된다.
 
 이것은 운영체제의 **가상 메모리 스왑**(RAM ↔ 디스크)과 똑같은 원리다.
+
+#### 7.4.1 LRU 구현 방식 — counter 방식 채택
+
+OS 교재의 LRU 구현 분류는 보통 3 가지:
+
+| 방식 | 자료구조 | 접근 비용 | Eviction 비용 | 본 구현 |
+|---|---|---|---|---|
+| **Stack** | 양방향 연결리스트 (MRU 머리 / LRU 꼬리). 접근할 때마다 move-to-front. | O(1) | O(1) tail-pop | ❌ |
+| **Counter** | 슬롯마다 *마지막 접근 클럭값*(타임스탬프)을 저장. eviction 시 최소값을 선형 스캔. | O(1) write | O(n) 스캔 | ✅ **채택** |
+| **Reference bit (Aging)** | 슬롯마다 8-bit shift 레지스터. 타이머마다 우측 시프트 후 reference bit 를 MSB 에 OR. | O(1) bit set | O(n) 레지스터 비교 | ❌ |
+
+본 프로젝트의 F9 캐시는 **counter 방식** 이다. 이유와 코드 근거:
+
+**(1) 슬롯 구조에 카운터 필드 직접 보관** — `xv6-riscv/kernel/cache.c`:
+
+```c
+struct cache_entry {
+  uint64 hash;
+  uint   last_access;   // ← LRU 카운터 — 마지막 접근 시점의 ticks 값
+  ushort vlen;
+  ushort has_sig;
+  uint64 sig[SIG_K];
+  char   val[CACHE_VAL];
+};
+```
+
+**(2) 접근(set/get)마다 글로벌 `ticks` 를 카운터로 기록** — 동일 파일:
+
+```c
+// cache_set 안
+cache_ram[i].last_access = ticks;
+
+// cache_get_exact 안 (RAM hit 경로)
+cache_ram[i].last_access = ticks;
+```
+
+xv6 의 글로벌 `ticks` 는 타이머 인터럽트마다 단조 증가하는 클럭 — *별도의
+LRU 전용 카운터를 둘 필요 없이* 시스템 시계를 그대로 LRU 카운터로 재활용한다.
+
+**(3) Eviction 시 16 슬롯 선형 스캔으로 최소값 찾기** — 동일 파일 `cache_set`:
+
+```c
+int lru = 0;
+uint lru_tick = cache_ram[0].last_access;
+for(int j = 1; j < CACHE_SLOTS; j++){
+  if(cache_ram[j].last_access < lru_tick){
+    lru_tick = cache_ram[j].last_access;
+    lru = j;
+  }
+}
+// → cache_ram[lru] 를 /cache.bin 으로 disk_append, 그 자리에 새 항목 set
+```
+
+#### 7.4.2 왜 stack/aging 대신 counter 였나
+
+- **슬롯이 16 개로 작다.** O(n) 스캔이라 해도 16 비교 = 수십 사이클. stack
+  방식의 O(1) 가 *실측상* 의미를 갖지 않는다.
+- **글로벌 `ticks` 재활용.** xv6 가 이미 단조 증가 클럭을 갖고 있어 별도
+  카운터를 둘 필요가 없다. counter 방식의 본질적 비용 — "전역 클럭 유지" —
+  를 *공짜로* 얻는 셈.
+- **stack 방식의 부가 부담을 회피.** 양방향 연결리스트는 슬롯 구조에
+  `prev/next` 포인터를 추가하고, set/get 시 list 재배치를 위한 lock 순서를
+  새로 고민해야 한다. RAM 캐시는 이미 `cache_lock` + `disk_io_lock` 의
+  2-lock 위계를 갖고 있어 자료구조 복잡도를 더 늘릴 동기가 없다.
+- **aging(reference bit) 은 *근사* LRU.** 페이지 캐시처럼 슬롯이 수천 개
+  이상이라 정확한 LRU 의 O(n) 스캔조차 부담일 때 쓰는 절충안 — 16 슬롯에는
+  과한 도입이고, 정확도만 떨어뜨린다.
+
+요약하면 본 구현은 **정확한(approximate 가 아닌) counter 기반 LRU** 이며,
+xv6 의 `ticks` 단조 카운터를 *글로벌 클럭으로 재활용* 한 것이 핵심 설계
+선택이다.
+
+### 7.4.3 캐시되는 질문 vs 캐시되지 않는 질문
+
+ReAct 자율 루프 (`agent.py` 의 `handle()`) 는 *모든 답변* 을 캐시에 저장하지
+않는다. **두 개의 가드** 가 *동시에* 통과해야 저장한다. 그렇지 않으면 다음에
+같은 질문이 들어와도 stale (낡은) 답이 나올 수 있기 때문.
+
+| 가드 | 코드 위치 | 통과 조건 | 통과 못하면 |
+|---|---|---|---|
+| **① 길이 가드** | `agent.py:_cache_store` | `len(question.strip()) >= 4` | 캐시 저장 skip |
+| **② 도구 가드** | `agent.py:handle` 내 `used_impure` | ReAct 루프 동안 *impure* 도구를 한 번도 호출하지 않았어야 함 | 캐시 저장 skip |
+
+#### Pure tool vs Impure tool — 분류 근거
+
+```python
+# agent.py
+PURE_TOOLS = {"chat", "list", "help"}    # 시스템 상태와 무관 — 결과가 stale 되지 않음
+# 그 외 ls / read / write / ps / nice / print 는 impure — 시스템 상태 의존
+```
+
+- **Pure (캐시 가능)**: `chat` (LLM 추론만), `list` (정적 도구 목록), `help`
+  (정적 문서). 호출해도 *읽는 게 시스템 상태가 아니라* 와이어 통로/정적
+  문서일 뿐이라, 1 시간 뒤에 같은 질문이 와도 답이 그대로 유효.
+- **Impure (캐시 차단)**: `ls`/`read` (파일시스템 상태 의존), `write` (파일
+  수정), `ps` (실행 중 프로세스 목록 — 매 순간 변화), `nice`
+  (priority 변경), `print` (stdout 부수효과). 이 중 *하나라도* 호출되면 답이
+  *그 순간의 시스템 스냅샷* 에 종속됨 → 캐시하면 다음에 stale.
+
+#### 캐시 *조회* 는 항상 시도된다
+
+길이/도구 가드는 *저장* 단계만 통과 검사한다. *조회* 는 무조건 일어남:
+
+```python
+def handle(self, user_input: str) -> None:
+    # 매 입력마다 — 길이/도구 가드와 무관하게 — 캐시부터 본다
+    cached = self._cache_lookup(user_input)
+    if cached is not None:
+        info("[cache HIT] ...")
+        answer(cached); return
+    # MISS 면 ReAct 루프 시작
+```
+
+즉 *과거에 저장된* 답이 있으면 짧은 질문이든 긴 질문이든 모두 HIT 가능.
+
+#### 동작 흐름 비교 — 캐시 HIT / 캐시 MISS·저장 / 캐시 MISS·미저장
+
+세 시나리오를 같은 입력 형태에 대해 나란히 보자.
+
+**시나리오 A — 캐시 HIT (Solar 호출 ❌, ReAct 루프 ❌)**
+
+```
+you ▸ 11 + 22는 얼마인지 알려줘
+   │
+   ▼ self._cache_lookup → REQ|CACHE_GET|11 + 22는 얼마인지 알려줘
+   ▼ 커널: FNV-1a hash → ram_find → HIT
+   ▼ RESP|HIT|11 + 22는 33입니다.
+[cache HIT] answer reused from kernel F9 cache (Solar not called)
+╭─ answer ─╮
+│ 11 + 22는 33입니다.
+╰──────────╯
+```
+- 비용: **Solar API 호출 0, 와이어 왕복 1회 (CACHE_GET), 게스트 도구 0회**
+- 보이는 표식: 청록 `[cache HIT]` 줄. `▶ step` 줄이 *전혀 안 보임*.
+
+**시나리오 B — 캐시 MISS + 저장 (다음 호출에서 HIT 가능)**
+
+```
+you ▸ 11 + 22는 얼마인지 알려줘    ← 첫 호출, 캐시 비어 있음
+   ▼ _cache_lookup → RESP|MISS
+   ▼ ReAct 루프 시작
+   💭 산술 — 답은 33
+   ▶ step 1 · chat                ← PURE_TOOLS 안의 chat → used_impure=False 유지
+xv6 ┃ (chat 응답)
+   💭 ...
+   ▼ reply 에 "answer" 포함됨
+   ▼ used_impure==False && len(question.strip())>=4 → _cache_store
+   ▼ REQ|CACHE_SET|<klen>:<key><val>
+╭─ answer ─╮
+│ 11 + 22는 33입니다.
+╰──────────╯
+```
+- 비용: **Solar 호출 N회 (step 마다 1), 와이어 왕복 = step 수 + 2 (lookup+set)**
+- 보이는 표식: `▶ step` 줄 N 개, `[cache HIT]` *없음*. 다음 동일/유사 질문은
+  시나리오 A 로 진행.
+
+**시나리오 C — 캐시 MISS + 저장 안 됨 (다음에도 MISS)**
+
+```
+you ▸ 현재 실행 중인 프로세스 보여줘
+   ▼ _cache_lookup → RESP|MISS
+   ▼ ReAct 루프 시작
+   ▶ step 1 · ps                 ← impure → used_impure=True
+xv6 ┃ pid=1 state=sleep ...
+   ▼ reply 에 "answer" 포함됨
+   ▼ used_impure==True → _cache_store SKIP
+╭─ answer ─╮
+│ init, agentd, sh 가 실행 중입니다.
+╰──────────╯
+```
+- 비용: **Solar 호출 N회, 와이어 왕복 = step 수 + 1 (lookup 만, set 없음)**
+- 같은 질문을 다시 해도 다음에도 MISS — *의도된 동작*. 프로세스 목록은 1분
+  뒤에 달라질 수 있으므로 캐시하면 안 됨.
+
+#### 한눈에 보는 매트릭스
+
+| 질문 유형 | impure 도구 호출? | 길이 ≥4? | 저장? | 다음에 같은 질문하면? |
+|---|---|---|---|---|
+| `"11+22 는?"` | ❌ (chat 만) | ✅ | ✅ | HIT |
+| `"안녕"` | ❌ (chat 만) | ❌ (3 byte 미만) | ❌ | MISS (매번 Solar 호출) |
+| `"ls 해줘"` | ✅ (ls) | ✅ | ❌ | MISS (매번 ReAct 루프) |
+| `"plan.txt 에 X 라고 써"` | ✅ (write) | ✅ | ❌ | MISS |
+| `"파이썬에서 lambda 가 뭐야"` | ❌ (chat 만) | ✅ | ✅ | HIT |
+
+#### `:ask` 단일샷 경로는 가드를 거치지 않음
+
+`:ask <질문>` 으로 시작하면 `agent.py` 는 ReAct 루프 자체를 건너뛰고
+`REQ|ASK|<질문>` 와이어 한 줄만 커널에 보낸다. 캐시 HIT/MISS 분기와 LLM 호출
+모두 *커널 안에서* 처리됨 (§7.6 참고). 길이 가드·도구 가드는 *agent.py 측의
+정책* 이므로 `:ask` 경로에서는 작동하지 않는다 — 커널 측에서는 *모든* 응답을
+저장한다 (커널은 도구 사용 유무를 알 수 없으므로 그 정책을 적용할 수 없음).
+
+> 두 경로의 차이가 헷갈리면 §12.2 (두 입력 모드 비교) 와 §7.6 (커널이
+> 주관하는 오케스트레이션) 을 함께 보면 명확.
 
 ### 7.5 캐시에 직접 접근하는 통로 — 시스템 콜
 
@@ -1520,6 +1736,962 @@ Project_Guide.md            §11 신규       이 섹션
 - **CFS priority 1~19 의 가중치 곡선 점검**: `priority_test` Test 3 가 평균 인덱스 검증조차 통과 못 함 (H 평균이 M·L 보다 느림). `eval fair` (prio=0 vs 20) 는 통과하므로 가중치 자체는 동작하나, *좁은 범위에서 burn load 가 부족*. 진짜 통과까지 끌고 가려면 (a) burn WORK 를 ~100M 으로 늘리거나 (b) CFS 의 vruntime 가중치 매핑을 점검하면 됨.
 - **`write_race` 의 재시도 루프**는 *증상 완화* 임 — 더 근본적으로는 dispatch 가 처리 완료까지 block 하는 동기 API 를 별도로 두는 게 깔끔. 현재 셋업에서는 6초 백오프로 충분히 안정적.
 
+### 11.9 confirm-escape v2 — yield-polling → sleep/wakeup 전환
+
+#### 11.9.1 무엇이었나
+
+원래 F7 jail 정책은 `is_agent=1` 인 프로세스가 `exec` / `kill` / `mknod` 를
+호출하면 **무조건 -1 반환**. 보안은 확보되지만 *한 번의 정당한 사용* 도
+허용 안 되는 강한 정책. 이걸 *호스트 사용자에게 1 회 허용 여부를 묻고 결과
+대로* 가는 confirm-escape 매커니즘으로 격상하려 했다.
+
+흐름:
+
+```
+guest syscall(exec)
+   ↓ syscall.c 의 agent_blocked() 분기
+confirm_request(num, summary)
+   ↓ printf("CONFIRM_REQ|<pid>|<call>|<summary>\n")
+   ↓ wait …
+host agent.py 의 _reader 스레드가 "CONFIRM_REQ|" 잡음
+   ↓ 사용자에게 y/N 프롬프트
+   ↓ 답이 y 면 REQ|agent:host|CONFIRM_RES|<pid>|y 송신
+   ↓ kernel agentcmd.c 의 handle_confirm_res → confirm_resolve(pid, 1)
+guest 의 confirm_request() 가 wakeup → return 1 → syscalls[num]() 디스패치
+   (n 또는 5초 timeout 이면 -1)
+```
+
+#### 11.9.2 v1 의 실패 — kerneltrap panic
+
+v1 은 `yield()` 기반 polling 으로 호스트 응답을 대기:
+
+```c
+for(;;){
+    acquire(&confirm_lock);
+    if(confirm_result != -1){ rc = confirm_result; release(&confirm_lock); break; }
+    release(&confirm_lock);
+
+    acquire(&tickslock); int elapsed = ticks - t0; release(&tickslock);
+    if(elapsed >= CONFIRM_TIMEOUT_TICKS) break;
+
+    yield();   // ← v1: CPU 양보
+}
+```
+
+이 빌드에서 jail + exec 시도시:
+
+```
+scause=0xf  sepc=0x80005e94  stval=0x3fffff8000
+panic: kerneltrap
+```
+
+- `scause=0xf` → Store/AMO page fault (커널 모드에서 쓰기 폴트)
+- `sepc=0x80005e94` → kernelvec 의 `sd gp, 16(sp)` (트랩 진입 후 레지스터 저장 명령)
+- `stval=0x3fffff8000` → 유저 영역 스택포인터 같은 값
+
+해석: **kernelvec 진입 시점에 sp 가 유저 영역 값** — 트랩 진입 후 첫
+register-save store 가 페이지폴트. yield-polling 의 `printf` ↔ `console
+sleeplock` ↔ 트랩 entry 의 sp swap path 가 결합된 어떤 race 가 의심되나
+gdb 부착 없이는 정확 위치 특정 불가. 임시로 confirm_request 호출을 빼고
+*v1 모듈은 미사용 상태로* 두었었다.
+
+#### 11.9.3 v2 — sleep(&ticks, &confirm_lock) 으로 표준화
+
+핵심 통찰: **xv6 의 `clockintr()` 가 매 tick `wakeup(&ticks)` 를 호출** 한다
+(`trap.c:189`). 즉 `&ticks` 채널에서 자면 ≤10 ms latency 로 자연 wake.
+이걸 timeout 메커니즘으로 재사용하면 yield-polling 이 통째로 불필요.
+
+v2 핵심 (`xv6-riscv/kernel/confirm.c`):
+
+```c
+acquire(&confirm_lock);
+for(;;){
+    if(confirm_result != -1){ rc = (confirm_result == 1) ? 1 : 0; break; }
+
+    acquire(&tickslock); uint elapsed = ticks - t0; release(&tickslock);
+    if(elapsed >= CONFIRM_TIMEOUT_TICKS) break;
+
+    sleep(&ticks, &confirm_lock);   // ← v2: 표준 sleep/wakeup
+}
+confirm_pending_pid = 0;
+confirm_result = -1;
+release(&confirm_lock);
+```
+
+`sleep(chan, lk)` 의 의미: atomic 하게 `lk` 를 release + 현재 프로세스를
+SLEEPING 상태로 park + scheduler 진입. wake 시 lk 재획득. **트랩 entry/sp
+swap 경로를 거치지 않는다** — yield 처럼 직접 sched() 부르는 게 아니라
+스케줄러 루프가 다시 들어와서 골라 깨우는 정석 경로. 따라서 v1 의 어떤 race
+든 *이 경로에서는 발생할 여지가 없다*.
+
+`confirm_resolve()` 는 결과 set 후 `wakeup(&ticks)` 호출 — sub-tick latency
+보장. 다른 `&ticks` sleeper 도 같이 깨지만 그들은 자기 조건 재검사 후 다시
+sleep 하므로 정합성 영향 없음.
+
+#### 11.9.4 검증
+
+같은 `agentdemo` (jail → exec) 시나리오를 v2 빌드에서 실행:
+
+```
+agentdemo
+=== agent sandbox demo ===
+[demo] jailed: '/' is now the agent box
+[demo] read inside jail: hello from inside the jail
+[demo] OK   escape via '..' blocked
+[demo] OK   outside file '/cat' is invisible
+[demo] OK   negative priority denied (no escalation)
+CONFIRM_REQ|5|7|exec                                          ← confirm_request 발화
+[sandbox] pid 5 (agentdemo): syscall 7 denied (confirm-escape)← 5초 timeout 후 deny
+[demo] OK   exec() blocked by sandbox
+=== demo done ===
+$ ls       ← 시스템 안정성 확인
+... (정상 파일 목록)
+$ echo confirmlive
+confirmlive                                                    ← 정상 동작
+```
+
+PASS 기준 모두 충족:
+- ✅ `CONFIRM_REQ|<pid>|7|exec` 와이어 출력 (호스트 측 핸들러 트리거 가능)
+- ✅ 호스트 응답 없을 때 5초 timeout 자동 deny → -1
+- ✅ `[sandbox] pid X: syscall 7 denied (confirm-escape)` 메시지
+- ✅ `[demo] OK   exec() blocked by sandbox` 도달 — agentdemo 전 단계 통과
+- ✅ **kerneltrap panic 사라짐**
+- ✅ 후속 셸 명령 정상 — 시스템 안정성 회귀 없음
+
+#### 11.9.5 캐시와의 공존
+
+§7.4.3 참고. 두 계층은 직교 — 캐시는 *agent.py 의 LLM 응답 캐시* 영역,
+confirm-escape 는 *kernel syscall dispatch* 영역. 공유 자료구조 없고,
+agent.py 의 도구 verb 9 종 중 어느 것도 `exec`/`kill`/`mknod` 와 매핑되지
+않아 *논리적 접점* 도 발생하지 않는다. 미래에 그런 도구 verb 가 추가되면
+이미 캐시 가드가 `PURE_TOOLS` 화이트리스트로 자동 차단함 (impure → 캐시 X).
+
+#### 11.9.6 변경 파일 (v2 추가분)
+
+```
+xv6-riscv/kernel/confirm.c     yield-polling → sleep(&ticks, &confirm_lock)
+xv6-riscv/kernel/syscall.c     agent_blocked 분기 복원 — confirm_request 호출
+Project_Guide.md               §11.9 신규 (이 절)
+```
+
+`confirm.c`/`agentcmd.c`/`agent.py _handle_confirm_req` 의 와이어 핸들러는
+v1 시점에 이미 갖춰져 있었고 이번 변경은 *호출 경로 활성화 + sleep 패턴
+교체* 두 가지만.
+
+### 11.10 Ralph 사이클 — 26 시나리오 자동 회귀
+
+#### 11.10.1 동기
+
+§11 의 `regression.sh` 는 *셸 자동 명령* 9 개를 순차 실행하는 회귀. 그 위에
+§11.9 confirm-escape 활성화 이후 *호스트 y/n 응답 경로* 와 *exec/kill/mknod
+세 위험 syscall 의 confirm-escape gate* 같은 새 분기가 늘었다. 이걸 사람이
+손으로 매번 검증하는 건 비현실적 → Ralph-style 자동화: 부팅 → 시나리오
+순차 → fail-marker grep → fix → rebuild → 재실행 을 *원클릭* 으로.
+
+#### 11.10.2 도구 — `tools/ralph_battery.py`
+
+```bash
+python3 tools/ralph_battery.py
+```
+
+옆 포트 (5555) 에서 격리된 qemu 인스턴스를 새 fs.img 복사본으로 띄워 26 개
+시나리오를 순차 실행. 기존 4444 qemu-agent 세션과 충돌 없음. 한 번에 ~3 분.
+
+내부:
+- 포트 5555 qemu **wait 모드** (`-serial tcp:...,server` — `,nowait` 빼면
+  클라이언트 접속까지 부팅 대기) — 부팅 로그 손실 방지.
+- TCP 클라이언트 + reader thread + transcript 누적.
+- 각 시나리오: `send("cmd")` + `wait_for_count(marker, target_count, timeout)`
+  로 *해당 시나리오 안에서 새로 발생한* marker 만 카운트.
+- 마지막에 fatal-marker 스캔: `"panic:"`, `"kerneltrap"`, `"scause="`.
+
+#### 11.10.3 26 시나리오 카탈로그
+
+| ID | 시나리오 | PASS 조건 |
+|---|---|---|
+| S0 | 부팅 | `init: starting sh` 도달 |
+| S1a/b | 셸 기본 | `ls` + `echo` 응답 |
+| S2 | agentdemo (timeout deny) | `=== demo done ===` 도달 + `CONFIRM_REQ\|...\|exec` 발화 + `denied (confirm-escape)` 메시지 + jail ACL 4 단계 모두 OK + priority guard |
+| S3 | cache_test | `=== N PASS / 0 FAIL ===` 푸터의 FAIL=0 |
+| S4 | cfs_share | non-fatal 종료 |
+| S5 | write_race | non-fatal 종료 |
+| S6 | priority_test | non-panic (§11.8 알려진 평균-FAIL 은 패스로 처리) |
+| S7 | eval cache 5 | non-fatal + "hit" 등장 |
+| S8 | eval fair 200 | non-fatal |
+| S9 | eval acl 5 | non-fatal |
+| S10 | priority guard (negative priority denied) | agentdemo 내 메시지 |
+| S11 | 두 번째 agentdemo 연속 (다중 pending 경계) | `=== demo done ===` 카운트 증가 |
+| **S12** | **호스트 y → confirm-escape ALLOW** | demo done + `denied` 메시지 **부재** |
+| **S13** | **호스트 n → confirm-escape DENY** | demo done + `denied` 메시지 **발화** |
+| **S14** | **SYS_kill confirm-escape (host n)** | `CONFIRM_REQ\|...\|6\|kill` 발화 + `=== ck done ===` |
+| **S15** | **SYS_mknod confirm-escape (host y)** | `CONFIRM_REQ\|...\|17\|mknod` 발화 + `=== cm done ===` |
+| Z | 후속 셸 살아 있음 + fatal 부재 | echo 응답 + panic/kerneltrap/scause 모두 없음 |
+
+볼드체는 §11.9 confirm-escape 활성화 이후 *추가된* 신규 커버리지.
+
+#### 11.10.4 사이클 동안 찾은 버그 — driver vs kernel 분리
+
+총 26 개 시나리오 중 *진짜 커널 버그* 는 **1 개** (§11.10.5), 나머지는 driver
+매처 버그.
+
+| 사이클 | FAIL 시나리오 | 진단 | 분류 |
+|---|---|---|---|
+| 1 | S3_cache_test_no_fail | `"FAIL" in block` 매처가 `"0 FAIL"` 푸터에 false match | driver |
+| 1 | S11_agentdemo_second | `wait_for()` 가 전체 transcript 검색 — 첫번째 `=== demo done ===` 에 즉시 매치 → 0.3 s 후 종료 → snapshot 잡히기 *전에* 두번째가 완료될 수도 있는데 그걸 못 봄 | driver |
+| 2 | (위 두 개 fix 후 24/24) | — | — |
+| 3 | S12_confirm_allow_no_deny_msg | 호스트 y 응답이 syscall 에 도달 못 함 (큐 정체) | **kernel** |
+| 4 | (커널 fix 후 22/22) | — | — |
+| 5 | (kill/mknod 시나리오 추가, 26/26) | — | — |
+
+**driver 버그의 교훈**: 자동화된 회귀에서 marker 매처는 *해당 시나리오 안에
+새로 발생한 것* 을 가려야지, 전체 transcript 에 한 번이라도 등장하면 통과로
+인정하면 안 됨. → `wait_for_count(needle, target_count, timeout)` 도입.
+
+**"느린 거 vs stuck 의 구별"**: 두 번째 agentdemo 가 wallclock 25 s 에 끝나지
+않는 걸 보고 처음에는 *lost wakeup* 으로 의심했음. 디버그 printf 로 wake 흐름
+추적해보니 *느려진 게 아니라* driver 가 잘못된 marker 매칭으로 *조기에* 종료
+한 거였음 — guest 시간 자체는 정상 (각 호출 5.1 s wallclock 으로 완료).
+
+#### 11.10.5 발견한 진짜 커널 버그 — 호스트 y/n 큐 정체
+
+§11.10.3 의 S12 가 처음 FAIL — 호스트가 `REQ|CONFIRM_RES|<pid>|y` 를 보냈는데
+도 게스트의 `confirm_request()` 가 timeout deny 경로로 들어감.
+
+**진단**: `agent_dispatch()` 는 *interrupt-safe enqueue* 만. 실제 처리는
+`agent_drain()` 이 하는데, 이건 `usertrap()` 끝에서만 호출됨. 우리 시나리오:
+- 자식 agentdemo: `confirm_request()` 안에서 `sleep(&confirm_wait_chan)` 으로
+  SLEEPING.
+- 부모 셸: `wait()` 로 SLEEPING.
+- `agentd`: `agent_recv()` 로 SLEEPING.
+- → *어떤 user proc 도 RUNNING 아님* → user trap 미발생 → `agent_drain()`
+  미호출 → 큐 정체 → CONFIRM_RES 영원히 대기.
+
+5 s 후 게스트 timeout 으로 deny 가 도착하지만, 이미 호스트가 y 보낸 후 5 s
+지남 — 결과적으로 deny path.
+
+**Fix** — `agent_dispatch()` 안에 *inline 처리* 추가:
+
+```c
+// agentcmd.c
+static int try_inline_confirm_res(const char *line) {
+    // expected: "REQ|[agent:<role>|]CONFIRM_RES|<pid>|<y|n>"
+    ...
+    confirm_resolve(pid, allow);     // spinlock + wakeup — interrupt-safe
+    return 1;
+}
+
+void agent_dispatch(char *line) {
+    if(try_inline_confirm_res(line)) return;   // bypass queue
+    // 기존 enqueue
+    ...
+}
+```
+
+CONFIRM_RES 는 sleep / FS 가 없는 *spinlock + wakeup 단순 동작* 이므로 큐
+거치지 않고 console interrupt context 에서 직접 처리해도 안전. 다른 메타
+명령 (ASK / CACHE_GET / CACHE_SET) 은 begin_op 가능성이 있어 큐 경로 유지.
+
+#### 11.10.6 신규 user 테스터 — `confirm_kill` / `confirm_mknod`
+
+기존 `agentdemo` 는 `exec` 만 트리거 (SYS_exec = 7). kill / mknod 게이트도
+*직접* 통과하는지 검증하려면 별도 user 프로그램이 필요. 두 개 추가:
+
+```
+xv6-riscv/user/confirm_kill.c       jail() 후 kill(99999) — SYS_kill (6) trigger
+xv6-riscv/user/confirm_mknod.c      jail() 후 mknod("/dev_test") — SYS_mknod (17) trigger
+```
+
+Makefile UPROGS 에 `_confirm_kill`, `_confirm_mknod` 추가. 게스트 셸에서:
+
+```sh
+$ confirm_kill         # CONFIRM_REQ|<pid>|6|kill  발화
+$ confirm_mknod        # CONFIRM_REQ|<pid>|17|mknod 발화
+```
+
+Ralph 사이클 S14 / S15 가 자동 검증.
+
+#### 11.10.7 최종 결과
+
+```
+total: 26/26 pass
+```
+
+confirm-escape v2 는 panic 없이 안정, 캐시 / CFS / jail ACL / 다중 confirm /
+호스트 y·n / 세 위험 syscall 모두 커버. driver 매처 버그를 분리 진단한 덕에
+*커널 버그 한 개* 만이 진짜 fix 대상이었고, 그건 inline CONFIRM_RES 로 해결.
+
+### 11.11 자연어 회귀 — `tools/ralph_natlang.py`
+
+#### 11.11.1 동기
+
+§11.10 의 `ralph_battery.py` 는 *셸/syscall 26 시나리오* 회귀 — agent.py
+브리지를 안 거치고 raw TCP 로 게스트 셸에 명령을 보내는 결정적 경로. 그런데
+§12 의 *자연어 ReAct 흐름* 자체에 회귀가 생길 가능성은 별개 — Solar API
+연동, mock fallback, `:ask` 커널 cache 경로, `_handle_llm_req` /
+`_handle_confirm_req` 같은 reader-thread 콜백이 *agent.py 내부* 에 살아있다.
+
+이 부분을 자동으로 검증하는 도구가 `tools/ralph_natlang.py`.
+
+#### 11.11.2 결정성 — mock 모드 활용
+
+Solar API 응답은 *비결정적* (LLM 출력 변동) → 회귀 부적합. 그러나 agent.py
+의 **mock 모드** (UPSTAGE_API_KEY 비어 있거나 미설정) 는 5 줄짜리 규칙
+기반 stand-in 으로 *완전 결정적*:
+
+```python
+def _mock_step(self):
+    last = self.messages[-1]["content"]
+    if last.startswith("OBSERVATION"):
+        return {"answer": "(mock mode — no LLM)\n" + body}
+    if "file"/"파일"/"list"/"목록"/"ls" 가 prompt 에 있으면:
+        return {"tool": "ls", "args": {}}
+    return {"tool": "print", "args": {"msg": last[:120]}}
+
+def _translate(prompt) -> str:    # used by :ask kernel-mediated path
+    if self.mock:
+        return f"CHAT|(mock) {prompt[:100]}"
+```
+
+테스트 하네스는 `env["UPSTAGE_API_KEY"] = ""` 로 mock 강제 — agent.py 의
+mock 검사가 `not (self.api_key and self.api_key.strip())` 로 강화되어 *빈
+키* 도 unset 과 동일하게 취급. 이 한 줄 변경으로 .env 파일을 만지지 않고
+회귀 환경만 격리된 mock 모드로 진입 가능.
+
+#### 11.11.3 11 시나리오 카탈로그
+
+| ID | 시나리오 | PASS 조건 |
+|---|---|---|
+| N1 | bridge connects | `connecting to xv6 at 127.0.0.1:6666` + `[bridge] connected` |
+| N2 | mock 모드 | `mode: mock` 헤더 |
+| N3a | ReAct step | `step 1` (mock 이 ls 도구 선택) |
+| N3b | ReAct answer | `answer` block 출력 |
+| N4 | ReAct 캐시 (skip) | mock 의 ls 가 impure → 캐시 안 됨 — :ask 경로(N5/N6) 가 캐시 검증 담당 |
+| N5a | `:ask` MISS LLM_REQ | `LLM_REQ ← cache miss` 발화 |
+| N5b | `:ask` chat 응답 | `(mock) <marker>` 가 게스트 콘솔에 출력 |
+| N6a | `:ask` 재호출 chat | 두 번째 `(mock) <marker>` 출력 |
+| **N6b** | **`:ask` 캐시 HIT** | LLM_REQ 가 *추가로 발화되지 않음* (`count == prior`) + 응답 < 3 s |
+| N7a | clean EOF exit | rc == 0 |
+| N7b | no traceback | transcript 에 `Traceback` 없음 |
+
+N6b 가 캐시 정합성의 결정적 증거 — MISS 는 12 s 전후 (mock thread + 와이어
+왕복), HIT 는 0.3 s 미만 (커널 RAM 매치 + 1 와이어 응답).
+
+#### 11.11.4 격리 포트 6666
+
+`ralph_battery.py` 는 5555, `ralph_natlang.py` 는 6666 — 둘 다 4444 사용자
+세션과 충돌 없이 *동시* 실행 가능. 각 도구는 자체 `fs.img` 복사본 사용
+(`/tmp/fs_ralph.img` vs `/tmp/fs_ralph_natlang.img`) 으로 디스크 잠금도 분리.
+
+#### 11.11.5 동안 발견한 버그
+
+| 라운드 | FAIL | 진단 | 분류 |
+|---|---|---|---|
+| 1 | N1, N2 | needle 매칭 잘못 (메시지 분리) + .env 의 Solar 키가 자동 로드돼 mock 강제 안 됨 | driver + 마이너 agent.py |
+| 2 | N5/N6 chat 응답 | `:ask` prefix 가 prompt 에서 떼어진 사실을 매처가 반영 안 함 | driver |
+| 3 | (위 fix 후 11/11) | — | — |
+
+agent.py 변경 — mock 검사를 빈 키도 mock 으로 인정하도록:
+
+```c
+// 변경 전
+self.mock = self.api_key is None
+
+// 변경 후
+self.mock = not (self.api_key and self.api_key.strip())
+```
+
+회귀 친화적 + 사용자도 .env 의 키를 빈 줄로 두면 mock 으로 동작 (이전엔
+빈 문자열 키로 인증 시도가 발생했음 — 사용자 경험에도 약간 개선).
+
+#### 11.11.6 변경 파일
+
+```
+tools/ralph_natlang.py        신규 (~200줄)  자연어 11 시나리오 회귀
+agent.py                       mock 검사 강화 (빈 키 → mock)
+Project_Guide.md               §11.11 신규 (이 절)
+```
+
+#### 11.11.7 실행
+
+```bash
+# 셸/syscall 26 시나리오:
+python3 tools/ralph_battery.py        # ~3 min, 격리 포트 5555
+
+# 자연어 14 시나리오 (mock 모드):
+python3 tools/ralph_natlang.py        # ~50 s, 격리 포트 6666
+
+# 둘 다 동시에 돌려도 OK (포트/디스크 분리). 사용자가 4444 에서 자연어로
+# 작업하면서 옆에서 회귀 두 개 동시 실행 가능.
+```
+
+### 11.12 wire 의 newline escape — multi-line WRITE/PRINT/CHAT 안전화
+
+#### 11.12.1 보고된 증상
+
+사용자가 자연어로 `/plan.txt 파일에 "TODO 1\nTODO 2" 작성해줘` 요청 →
+agentd 가 `WROTE 6 bytes` (TODO 1만 저장) → 그 후 게스트 셸이 `exec TODO
+failed` 출력 → 이후 step 들은 같은 식으로 부서져 답변 없이 멈춤.
+
+#### 11.12.2 진단
+
+`agent.py` 의 `wire_for(write, ...)` 는 와이어를 단순히
+`f"WRITE|{file}:{text}"` 로 만들어 한 줄로 송신. 그런데 LLM 이 `text` 인자에
+*literal newline* 을 넣으면:
+
+```
+REQ|WRITE|/plan.txt:TODO 1\nTODO 2
+                          ↑
+            console 의 line terminator → 명령이 두 줄로 split
+            ─► 첫 줄: WRITE|/plan.txt:TODO 1   ─► 6 bytes 만 저장
+            ─► 둘째 줄: TODO 2                 ─► 셸 명령으로 해석 ─► "exec TODO failed"
+```
+
+ReAct 가 step 5 에서 LLM 이 *literal 두 글자* `\n` 을 보내면 이번엔 14 bytes
+저장 — 줄바꿈은 여전히 안 됨 (`\` + `n` 두 글자가 파일에 그대로 들어감).
+즉 unescape 부재.
+
+#### 11.12.3 Fix — 양방향 convention 통일
+
+**송신측 (`agent.py:wire_for`)** — `write`/`print`/`chat` payload 의
+`\r` 제거 + `\n` → `\\n` (literal 두 글자) escape:
+
+```python
+def _wire_escape(s) -> str:
+    return str(s).replace("\r", "").replace("\n", "\\n")
+
+# in wire_for(...):
+if tool == "chat":  return f"CHAT|{_wire_escape(args.get('msg',''))}"
+if tool == "write": return f"WRITE|{args['file']}:{_wire_escape(args.get('text',''))}"
+if tool == "print": return f"PRINT|{_wire_escape(args.get('msg',''))}"
+```
+
+**수신측 (`xv6-riscv/user/agentd.c`)** — `do_write`/`do_print`/`do_chat`
+가 in-place unescape 후 사용:
+
+```c
+static void unescape_inplace(char *s) {
+    char *r = s, *w = s;
+    while(*r){
+        if(*r == '\\' && *(r+1) == 'n'){ *w++ = '\n'; r += 2; }
+        else { *w++ = *r++; }
+    }
+    *w = 0;
+}
+
+static void do_write(char *arg) {
+    ... char *data = c + 1;
+    unescape_inplace(data);   // ← payload 만 unescape, path 는 손대지 않음
+    ...
+}
+```
+
+특징:
+- **단방향 escape** — backslash 자체는 doubling 안 함. literal `\n` 가
+  필요하면 `\\n` 두 번 쓰면 됨. 일반 텍스트에선 backslash 가 흔치 않아 안전.
+- **payload 만 unescape** — path / file 이름은 그대로. 파일명에 newline
+  쓰는 사람 없음.
+- **in-place** — output 길이 ≤ input 길이라 buffer 재할당 불필요.
+
+#### 11.12.4 회귀 — `ralph_natlang.py` N10 (조기 배치)
+
+```
+N10a write_done                  agentd 가 [agentd] WROTE 도달
+N10b write_17_bytes              "WROTE 17 bytes to /mock_multi.txt"
+                                  └ 5+1+5+1+5 = 17, escape 정상 동작 증명
+                                    (split bug 면 5, literal \\n bug 면 21)
+N10c read_done + line1/2/3       readback 시 세 줄 모두 등장
+```
+
+N10 을 *N5/N6 cache-HIT 시나리오 이전* 에 배치 — N5/N6 의 ASK cache HIT 경로
+에는 SMP race 로 가끔 발생하는 panic (`scause=0xf sepc=0x80005e88` —
+kernelvec entry 의 register-save store) 이 있어 그 뒤로 시스템이 죽을 수
+있음. N10 의 결과를 그 panic 이 가리지 않도록 조기 배치한 것.
+
+> *그 ASK cache-HIT panic 자체* 는 §11.12 fix 와 무관 (이전부터 가끔 발생).
+> 결정적 재현 미확보 — 추후 별도 task 로 진단 예정.
+
+#### 11.12.5 변경 파일
+
+```
+agent.py                       _wire_escape 헬퍼 + wire_for 의 3개 도구에 적용
+                               + mock _mock_step 에 "작성"/"읽어" 키워드 추가
+                               (multi-line 회귀가 자연어로 결정적 호출 가능)
+xv6-riscv/user/agentd.c        unescape_inplace 헬퍼 + do_write/do_print/do_chat
+                               에서 payload unescape
+tools/ralph_natlang.py         N10 multi-line 시나리오 (조기 배치)
+Project_Guide.md               §11.12 신규 (이 절)
+```
+
+#### 11.12.6 최종 결과
+
+```
+ralph_battery  26/26 (셸/syscall, 포트 5555)
+ralph_natlang  23/23 (자연어 + multi-line + spawn confirm, 포트 6666)
+─────────────
+total          49/49 PASS
+```
+
+### 11.14 console 의 char-단위 echo race — REQ| wire payload silent
+
+#### 11.14.1 보고된 증상
+
+사용자가 자연어로 `echo "안녕" 프로세스를 만들어줘` 요청 →
+
+```
+   ▶ step 1 · spawn  bin=/echo  argv=['/echo', '안녕']
+   xv6 ┃ NT|__OBS6__                                  ← ① 이상한 깨진 출력
+   xv6 ┃ [sandbox] pid 5 (agentd): syscall 7 denied   ← ② confirm prompt 안 떴는데 deny
+   xv6 ┃ [agentd] SPAWN: exec /echo failed
+```
+
+문제 두 가지:
+- ① wire 의 echo (`REQ|PRINT|__OBS6__`) 가 *부분 잘림* — `NT|__OBS6__`
+- ② 호스트 사용자에게 `[jail] ...y/N` 프롬프트가 *전혀 안 뜨고* 즉시 deny
+
+#### 11.14.2 진단
+
+`consoleintr()` 가 *char 단위 echo* (`consputc(c)` 매 char) — agent.py 가
+보낸 wire 의 byte 들이 게스트 console socket 으로 그대로 echo. 이 echo 가
+*동시에* 게스트의 다른 출력 (예: `agentd` 의 `printf("[agentd] ...")`) 와
+*byte 단위 interleave*. 두 출력의 lock 이 다름:
+
+- `consoleintr` 의 echo: `cons.lock` 으로 보호되는 char 출력
+- `consolewrite` (게스트 `printf`): `conswr_lock` 으로 보호되는 line 출력
+
+서로 직교한 두 lock — uart 로 가는 byte 들이 자유롭게 섞임. 결과:
+
+```
+agent.py 송신: REQ|PRINT|__OBS6__\n
+게스트 출력:   [agentd] CONFIRM_REQ|5|7|exec\n     (동시)
+
+uart 로 가는 byte 순서 (interleave 예시):
+R E Q | P [ a g R I N T | ... 등 임의 섞임
+                ↓
+socket 으로 가는 데이터: 깨진 string 들
+                ↓
+agent.py reader: split('\n') 후 _show()
+                ↓
+화면: "xv6 ┃ NT|__OBS6__"  ← payload 의 fragment 만
+      "[sandbox] ... denied" ← agentd 의 printf 잔재
+```
+
+그리고 — 게스트의 `CONFIRM_REQ|5|7|exec` printf 도 같은 race 로 *깨진 형태*
+로 socket 에 도달. agent.py reader 의 `if ln.startswith("CONFIRM_REQ|"):`
+검출이 *매치 실패* → `_handle_confirm_req` 호출 안 됨 → **호스트에 prompt
+안 뜸** → 15 초 timeout → 자동 deny.
+
+#### 11.14.3 Fix — REQ| line payload echo skip
+
+`consoleintr()` 가 `agent_buf` 의 첫 4 byte 가 `REQ|` 임을 검출하면 그
+시점부터 *payload echo 를 skip*. 첫 4 char (`R/E/Q/|`) 와 line-terminator
+(`\n`) 만 echo 해서 line boundary 는 유지:
+
+```c
+int is_req = (agent_len >= 4 &&
+              agent_buf[0]=='R' && agent_buf[1]=='E' &&
+              agent_buf[2]=='Q' && agent_buf[3]=='|');
+if(!is_req)
+    consputc(c);
+else if(agent_len <= 4 || c == '\n')
+    consputc(c);     // "REQ|" prefix + \n only
+```
+
+효과:
+- wire payload 의 char 들이 게스트 console socket 으로 *흘러나가지 않음*
+- 다른 출력과 byte interleave 발생 source 제거
+- agent.py reader 가 받는 게스트 line 들이 *깨끗* → `CONFIRM_REQ|` 검출 성공
+  → `_handle_confirm_req` 호출 → prompt 정상 표시 → 사용자 y/N 동작
+
+> **첫 4 char + `\n` 은 왜 echo?** 첫 4 char (`R/E/Q/|`) 는 검출 *전* 이라
+> 어쩔 수 없이 새어 나가지만 짧고 *항상 line 시작* 이라 interleave 의 source
+> 가 작음. `\n` echo 가 빠지면 두 wire (예: spawn + marker) 의 echo 잔재
+> (`REQ|` 두 번) 가 그 다음 게스트 출력과 *concat* 되어 `REQ|REQ|CONFIRM_REQ|`
+> 같은 super-line 이 생긴다 (실제로 1차 fix 시도에서 관찰). `\n` 만 echo 해도
+> line boundary 가 유지돼 race 없음.
+
+#### 11.14.4 변경 파일
+
+```
+xv6-riscv/kernel/console.c     consoleintr() 의 default 분기 — REQ| sniff 후
+                               payload echo skip (first-4 + \n 만 유지)
+Project_Guide.md               §11.14 신규 (이 절)
+```
+
+#### 11.14.5 검증
+
+```
+ralph_battery   26/26   (agentdemo confirm allow/deny + 다른 시나리오 모두 동작)
+ralph_natlang   23/23   (N8 y → status=0, N9 n → exec failed — handler 정상 호출)
+─────────────
+total           49/49 PASS
+```
+
+사용자 보고 시나리오 (`echo "안녕" 프로세스를 만들어줘` 등) 도 이제 정상 —
+spawn → `[jail] pid=X 가 위험 syscall 'exec' 호출 요청 — 15 초 내 허용? (y/N)`
+prompt 가 *agent.py 터미널* 에 명확히 표시 → 사용자 y 입력 → `/echo` 실제
+실행 → 인자 출력 → status=0.
+
+### 11.13 `spawn` 도구 verb — 자연어로 프로세스 생성하기
+
+#### 11.13.1 동기 — 보고된 사용자 혼선
+
+§11.9 confirm-escape v2 를 도입한 뒤 자연어로 "프로세스 하나 만들어줘"
+요청 시 *agent.py 가 "만들어줄 수 없다"* 답변. 사용자 입장에서 "구현은
+했는데 왜 안 되지?" 가 자연스러운 반응.
+
+원인 — 두 계층의 분리:
+
+```
+사용자 자연어  ─► agent.py ReAct ─► 9 개 도구 verb 중 매핑   <─ ★ 여기서 끊김
+                                       │                       (exec/spawn 매핑 부재)
+                                  game 와이어 송신
+                                       │
+                                  agentd / 게스트 syscall
+                                       │
+                                  is_agent + agent_blocked?
+                                       │
+                                  confirm-escape 게이트
+                                       │
+                                  호스트 y/N
+```
+
+§11.9 의 confirm-escape 게이트는 *게스트 안에서 직접 exec/kill/mknod 를
+호출한 경우* 만 다룸 — 그런데 *agent.py 도구 verb 9 종 중 어느 것도* 이 세
+syscall 과 매핑되지 않아, 자연어 흐름이 게이트에 *도달조차 못함*.
+
+해결은 둘 중 하나: (a) 매핑 부재를 의도된 한계로 두고 문서화만, (b) 매핑을
+실제 추가. **사용자는 자연어로 가능하길 원했으므로 (b) 선택** — `spawn` 도구
+verb 를 시스템 전체에 통합.
+
+#### 11.13.2 전체 체인
+
+```
+사용자: "echo 프로세스를 만들어줘"
+   │
+agent.py ReAct
+   │   {"tool":"spawn","args":{"bin":"/echo","argv":["echo","hello"]}}
+   ▼
+wire_for(spawn, args)
+   │   "SPAWN|/echo|echo hello"
+   ▼
+REQ|<role>|SPAWN|/echo|echo hello  →  console → agentcmd → agent_drain
+   │
+agentd.execute("SPAWN", arg)
+   │   do_spawn() → fork()
+   │
+   ├── parent: wait(&st) — agentd 안 죽음
+   │
+   └── child: is_agent=1, jail_root inherited (proc.c fork)
+       │
+       exec("/echo", argv)  ← SYS_exec syscall
+       │
+       syscall.c agent_blocked() == true
+       │
+       confirm_request(SYS_exec, "exec")
+       │   sleep(&confirm_wait_chan)
+       │
+       ▼ 호스트:
+       CONFIRM_REQ|<pid>|7|exec  ─► agent.py reader → _handle_confirm_req
+                                       │
+                                       │  "[jail] pid=X — 5초 내 허용? (y/N)"
+                                       │  (별도 daemon thread 의 input())
+                                       │
+                                       ▼ 사용자 y 입력
+                                       REQ|agent:host|CONFIRM_RES|<pid>|y
+                                       │
+                                       ▼ console → inline → confirm_resolve
+                                       │   wakeup(&confirm_wait_chan)
+                                       │
+                                       ▼ 게스트 자식: confirm_request → 1 (allow)
+                                       │
+                                       ▼ syscalls[SYS_exec]() — exec 실제 수행
+                                       │
+                                       echo "hello" 출력
+   │
+   ▼ child exit → parent wait() return
+agentd: "[agentd] SPAWN /echo done (status=0)"
+   │
+agent.py: OBSERVATION → 다음 step → answer
+```
+
+핵심 — **agentd 가 직접 exec 하면 자기 자신이 죽으므로 반드시 fork. 자식이
+jail/`is_agent` 를 상속 (proc.c:375-377)** 해서 confirm-escape 게이트가
+자동 trip. agentd 가 새 자식을 만들었지만 게이트가 보안 경계를 유지.
+
+#### 11.13.3 변경 파일
+
+```
+agent.py                       SYSTEM_PROMPT + TRANSLATE_PROMPT 에 spawn 등록,
+                               wire_for() 에 SPAWN 와이어 빌더 추가,
+                               _mock_step() 에 spawn 키워드 트리거 추가
+xv6-riscv/user/agentd.c        do_spawn() 핸들러 (fork + argv 토크나이즈 + exec),
+                               table[] 에 SPAWN 등록, execute() 에 dispatch 추가
+xv6-riscv/user/agentd.c        populate_jail() — jail() 호출 *전* 에 자주 쓰는
+                               user binary (echo/cat/ls/wc/grep/mkdir/rm/ln/kill)
+                               를 /agentbox/ 로 hard-link. 멱등 (이미 있으면
+                               link() 가 -1 반환하지만 무해)
+xv6-riscv/user/agentdemo.c     exec 검증을 fork+exec 패턴으로 — confirm-escape
+                               allow path 에서 echo 가 실제 실행돼도 부모가
+                               wait() 후 demo done 출력 (자식이 echo 로 교체)
+```
+
+#### 11.13.3a populate_jail 의 필요성 및 bin 선정
+
+`jail("/agentbox")` 후엔 자식의 `exec(path)` 가 `path` 를 *jail_root 안에서*
+lookup (`fs.c:namex` 의 chroot 분기). 그런데 `/agentbox` 는 mkdir 만 되고
+*비어 있어* `/echo` (게스트 입장에서 `/agentbox/echo`) lookup 이 항상 실패.
+
+```
+(populate_jail 없이)
+agent.py: spawn("/echo", ["echo", "hi"])
+  ─► agentd fork
+  ─► child exec("/echo")  ─► confirm-escape 게이트 통과 (allow)
+  ─► sys_exec → namex("/echo") → /agentbox/echo lookup → NOT FOUND
+  ─► exec -1
+  ─► child exit(1)
+  ─► agentd: "[agentd] SPAWN: exec /echo failed"
+```
+
+`populate_jail` 이 `echo`/`cat`/`ls`/`wc`/`grep`/`mkdir`/`rm`/`ln`/`kill`/`sh`
+를 `/agentbox/` 안으로 link 하면 namex lookup 이 성공 → exec 실제 실행.
+
+**bin 선정 기준**: (a) UPROGS 에 실제로 빌드되는 user 프로그램만, (b) LLM 이
+자연어 의도로 자주 시도하는 것 (echo, sh, cat, ls), (c) 위험 syscall
+(`kill`) 도 포함하되 이건 `agent_blocked` 가 막아서 jail 안에서 호출돼도
+confirm-escape 게이트 통과해야 동작. `sh` 가 빠지면 LLM 이 `sh -c "..."`
+선택할 때 namex 실패 → 사용자 입장에서 "spawn 이 작동 안 한다".
+
+*이전 회귀의 `N8_child_exec_ran` 매처 `"(mock spawned)" in transcript` 는
+step args 출력 (`argv=['echo', '(mock spawned)']`) 과 false-match 해서 PASS
+였음* — 강화된 매처 (`"status=0"` 카운트 증가) 로 교체해야 진짜 exec 성공
+검증 가능.
+
+#### 11.13.3b confirm timeout — 5s → 15s
+
+처음 v2 는 `CONFIRM_TIMEOUT_TICKS = 50` (≈5 초). 사용자가 prompt 를 읽고
+의식적으로 y/N 결정하기에는 짧아 *읽기도 전에 timeout deny* 가 자주 발생.
+`150` (≈15 초) 으로 늘림.
+
+추가로 `agent.py:_handle_confirm_req` 에서 prompt 띄우기 *직전* `tcflush(TCIFLUSH)`
+로 stdin OS line buffer 를 drain. 이유: ReAct 도중 사용자가 무의식적으로
+Enter 한 번 친 빈 line 이 buffer 에 남아 있으면 confirm 의 `input()` 이
+*즉시* 그 빈 line 을 받아 "n" 으로 해석 → 사용자가 *prompt 를 본 적도 없이*
+강제 deny. drain 으로 stale 입력 제거.
+
+회귀 영향: ralph_battery 의 S11 (back-to-back agentdemo) 가 confirm timeout
+2배 의존이라 wait 시간을 15s → 30s 로 늘림 (driver 측 변경).
+
+`is_agent` 상속은 이미 §F7 jail 도입 시 `proc.c` 의 `fork()` 가 처리하고
+있었음 — 별도 변경 불필요.
+
+#### 11.13.4 캐시 가드와의 정합성
+
+`spawn` 은 시스템 상태를 변경 (새 프로세스 생성) → impure. `agent.py` 의
+`PURE_TOOLS = {"chat", "list", "help"}` 화이트리스트 밖이므로 **자동으로
+캐시 차단** — 같은 자연어 prompt 가 다시 들어와도 캐시 HIT 으로 *재실행
+없이* 답하는 위험 회피. §7.4.3 가드가 새 verb 도 자연스럽게 커버.
+
+#### 11.13.5 검증 — `ralph_natlang.py` N8 시나리오
+
+```
+N8a confirm_prompt_appeared    "[jail] pid=X" 가 호스트 transcript 에 출력
+N8b spawn_done                 agentd 의 "[agentd] SPAWN /echo done" 도달
+N8c child_exec_ran             자식이 실제 exec 수행 ("(mock spawned)" 출력)
+```
+
+세 단계 모두 통과 — 자연어 → spawn → confirm-escape → 호스트 y → exec
+체인이 정합. 총 회귀: **`ralph_battery` 26/26 + `ralph_natlang` 14/14 = 40/40
+GREEN**.
+
+### 11.15 cache miss / 자연어 회귀 확장 — N11-N17
+
+#### 11.15.1 보고된 증상
+
+사용자가 `agent.py` REPL 에 동일 prompt `"22 + 45가 얼마인지 알려줘"` 를
+**3번 연속** 입력. 매번 Solar LLM 호출 발생, `[cache HIT]` 표시 *없음*.
+F9 캐시가 정상 작동한다면 두 번째부터 `[cache HIT]` 와 함께 Solar 호출
+생략돼야 함. 또 조사 한 글자 ("가" → "는") 바꾼 prompt 에 LLM 이 마치
+*"45" 가 누락된* prompt 를 본 것처럼 `"질문이 완전하지 않은 것 같습니다"`
+답변.
+
+#### 11.15.2 진단 (Phase 1 — Explore agents 3×)
+
+**Issue A (cache miss) — 결정적 코드 버그**:
+
+`agent.py` 의 cache key 정규화가 lookup ↔ store 사이에 *불일치*:
+
+```python
+# _cache_store (line 814)
+key = question.replace("\n", " ").replace("\r", " ").strip()
+
+# _cache_lookup (line 800)
+key = question.replace("\n", " ").replace("\r", " ")        # ← .strip() 누락
+```
+
+trailing whitespace 가 한 byte 라도 있으면 두 key 의 FNV-1a hash 가 완전히
+달라져 (avalanche effect) — 게스트 cache 에는 *stripped key 로 저장* 되어
+있는데 lookup 은 *non-stripped key 로* hash 해서 ram_find() 가 항상 miss.
+사용자 prompt 의 trailing 은 cooked-mode `input()` 의 `_read_line` 끝에서
+한번만 strip 됨 (`line = line.strip()` at line 919) — 같은 string 흐름이
+`_cache_store` 와 `_cache_lookup` 양쪽에 전달되더라도 두 함수가 *자기 자신*
+strip 정책이 다르면 결과가 달라짐.
+
+**Issue B ("45" 누락) — LLM 한계**:
+
+`_read_line()` (cooked input) → `messages.append({"role":"user","content":user_input})`
+→ `client.chat.completions.create(messages=…)` 전 path 에서 user_input 의
+byte 가 *완전히 보존됨*. Solar API 가 받는 메시지는 사용자가 친 그대로.
+즉 누락은 **Solar 토크나이저 측**: 한국어 조사 ("는") + 인접한 ASCII
+숫자 ("45") 가 BPE token boundary 를 잘못 잡아 "45" token 이 dropped.
+*코드 fix 불가 — system prompt 강화로만 mitigation*.
+
+#### 11.15.3 Fix
+
+**Issue A 1-line fix** (`agent.py:_cache_lookup`):
+
+```python
+key = question.replace("\n", " ").replace("\r", " ").strip()
+```
+
+이걸로 두 함수 정규화 동일 — store/lookup hash 일치 → cache HIT 정상.
+
+**Issue B mitigation — SYSTEM_PROMPT 의 ★ token-boundary clause 일반화**:
+
+기존 spawn 도구 안내 안에 묻혀 있던 "Preserve every byte" 안내를 모든
+도구에 적용되는 *standalone clause* 로 빼냄:
+
+```
+★ Token-boundary rule (applies to ALL tools — chat, write, print, spawn,
+nice args, anywhere user text is echoed or quoted): preserve every byte of
+non-ASCII tokens (Hangul, CJK, emoji) verbatim. Do NOT drop the first
+character of "안녕"/"파일", do NOT let a leading quote merge with the first
+multi-byte code point, and do NOT silently elide numbers inside Korean
+sentences like "22 + 45는". If you are unsure, repeat the exact byte
+sequence the user typed rather than paraphrasing.
+```
+
+`§12.7` 한계점 표에도 Solar 토크나이저 한계 행 추가 — 사용자가 같은 증상을
+보면 *어떤 우회* 가 통하는지 알 수 있게 (한글 조사 분리 / 공백 추가).
+
+#### 11.15.4 자연어 회귀 카탈로그 — N11-N17
+
+`tools/ralph_natlang.py` 에 새 시나리오 7 개 추가. 기존 N1-N10 (23 record)
+와 합쳐 **39/39 PASS**:
+
+| ID | 카테고리 | 검증 |
+|---|---|---|
+| **N11** | greeting cache HIT (ReAct chat-only, **Issue A 회귀**) | "안녕하세요" 2회 → 2번째 `[cache HIT]` 출력 |
+| **N12** | 조사 변형 ("은"/"을") robustness | 두 prompt 모두 `step 1 · ls` + answer 도달 |
+| **N13** | (skipped — N5/N6 + N11 가 cache HIT path 충분 cover) | catalog completeness 만 |
+| **N14** | write→read 다단계 chain | `_mock_step_after_write` flag 로 결정적, step 1 WROTE 17 bytes → step 2 READ → answer 에 `line1` |
+| **N15** | ACL nice 음수 priority 거부 | guest console 에 `denied (pid=1 prio=-3)` |
+| **N16** | kill confirm-escape (spawn(/kill), 호스트 n) | CONFIRM_REQ + denied (confirm-escape) |
+| **N17** | 한글 argv verbatim (token-boundary 회귀) | guest console 에 `안녕세상` 출력 + status=0 |
+
+#### 11.15.5 사이클 동안 발견한 mock 버그
+
+mock 의 `_mock_step` 의 generic `OBSERVATION → answer` 분기가 `_mock_step_after_write`
+chain check 보다 *위* 에 있어, write step 후 OBSERVATION 도착 시 *즉시*
+answer 반환 → N14 의 step 2 read 가 호출 안 됨. fix — chain check 를 *최상위*
+로 이동.
+
+이걸 못 잡았다면 N14 가 영원히 FAIL — driver 매처 강화로는 풀 수 없는
+*mock 자체 버그*.
+
+#### 11.15.6 변경 파일
+
+```
+agent.py                       (a) _cache_lookup line 800 .strip() 추가
+                               (b) SYSTEM_PROMPT ★ token-boundary clause 일반화
+                               (c) _mock_step 에 N11/N14/N15/N16/N17 분기 추가
+                                    + OBSERVATION 분기보다 위에 chain check
+                               (d) Agent.__init__ _mock_step_after_write flag
+                               (e) import re 추가
+tools/ralph_natlang.py         N11-N17 7 개 시나리오 (N10 은 race 회피 위해
+                               마지막으로 이동)
+Project_Guide.md               §11.15 신규 (이 절) + §12.7 한계점 표
+                               Solar 토크나이저 행 추가
+```
+
+#### 11.15.7 최종 결과
+
+```
+ralph_battery   26/26   (영향 없음, agent.py 변경은 mock 모드만)
+ralph_natlang   39/39   (N1-N10 23 + N11-N17 16 = 39 record)
+─────────────
+total           65/65 PASS
+```
+
+사용자 시나리오 — 동일 prompt 2회 → 두 번째 `[cache HIT]` 등장. 같은 회귀
+가 `ralph_natlang` N11 에서 결정적으로 검증.
+
+### 11.16 backspace 첫-단어 잔재 — `_wipe_input` wrapped-row 계산 fix
+
+#### 11.16.1 증상
+
+`AGENT_RAW_INPUT=1` 으로 raw-mode REPL 을 켠 뒤, 긴 한글 prompt 를 입력하고
+backspace 로 처음부터 지우려고 하면 **첫 단어가 화면에 잔재로 남음**. 마지막
+글자부터 지워지지만 line 시작 부근 (prompt + 첫 단어) 가 깨끗이 안 없어짐 —
+다음 prompt 가 그 위에 다시 그려져 *중첩* 된 듯 보임. 사용자 표현: "예전에
+발생했던 같은 현상" (§12.8 의 한 글자 입력 키 여러 번 누름 이슈와 비슷한
+*입력 라인 위치 계산* 영역).
+
+#### 11.16.2 원인
+
+`agent.py:_wipe_input()` (line 147–) 의 wrapped-row 계산:
+
+```python
+width = _vis_width(_input_prompt) + _disp_width(_input_buf)
+rows_above = (width - 1) // _term_cols() if width > 0 else 0
+_raw("\r\033[2K")                  # 현재 row 지우기
+for _ in range(rows_above):
+    _raw("\033[1A\033[2K")         # 위쪽 row 들 지우기
+```
+
+한글은 *2 terminal cell* — `_disp_width` 가 한글 글자 마다 2 를 더해야
+정확. 그러나 wrap boundary 케이스 (예: terminal width 80, prompt 6 + 한글
+38 × 2 = 76 cell → 정확히 80 boundary 부근) 에서 `(width-1) // cols`
+계산이 *현재 row 만* 셈하고 *위 row 의 prompt 영역* 을 0 으로 underestimate.
+backspace 후 `_wipe_input` 가 현재 row 만 `\033[2K` 로 지우고, *위 row 의
+prompt + 첫 단어* 가 *손대지지 않은 채* 남음. `_draw_input` 이 그 위에 다시
+prompt + 줄어든 buf 를 그려도 *prompt 영역* 은 이미 화면 위쪽 다른 row 에
+잔재.
+
+#### 11.16.3 Fix — `+1` safety margin
+
+```python
+def _wipe_input() -> None:
+    cols = _term_cols()
+    width = _vis_width(_input_prompt) + _disp_width(_input_buf)
+    rows_above = max(0, (width - 1) // cols) if width > 0 else 0
+    _raw("\r\033[2K")
+    for _ in range(rows_above + 1):   # ← +1 safety margin
+        _raw("\033[1A\033[2K")
+    _raw("\r")
+```
+
+`+1` 추가 row 는 wrap 이 없을 때 *빈 row* 를 하나 더 지움 — 무해. wrap 이
+있을 때는 boundary 케이스에서 누락되던 prompt row 까지 도달. cooked-mode
+경로에도 안전성 강화 — `_read_line()` 의 prompt 출력 (`_raw("\n" + prompt)`)
+직후 `sys.stdout.flush()` 추가 (input() 가 stdin readline 시작하기 전 prompt
+가 terminal 에 *반드시* 출력되어 cursor 위치 기준 정합).
+
+#### 11.16.4 변경 파일
+
+```
+agent.py             _wipe_input() rows_above + 1 + 자세한 주석
+                     _read_line() cooked-mode 의 prompt 후 sys.stdout.flush()
+Project_Guide.md     §11.16 신규 (이 절) + §12.8 디버깅 팁 backspace 행
+```
+
+#### 11.16.5 검증
+
+- 자동 회귀: `ralph_natlang` / `ralph_battery` 모두 non-TTY pipe stdin 이라
+  raw-mode 경로 안 거침 — 영향 없음. 39/39 + 26/26 = 65/65 PASS 유지.
+- 수동 테스트 (TTY): `AGENT_RAW_INPUT=1 python3 agent.py` 후 긴 한글
+  prompt (예: 한 줄 가득) 입력 → backspace 로 line 비우기 → *첫 단어까지
+  깨끗이* 사라짐.
+
 ---
 
 ## 12. 자연어로 직접 작업시키기 (`agent.py` 가이드)
@@ -1719,6 +2891,61 @@ xv6 ┃ nice failed: insufficient privilege (sandbox)
 ```
 **PASS 기준**: `nice failed` / `insufficient privilege` 등장 → ACL 가드 동작.
 
+#### ⑦ confirm-escape — 자연어로 "프로세스 만들어줘" → 호스트 y → 실행
+
+`spawn` 도구 verb (§11.13) 가 자연어 흐름에서 confirm-escape 게이트를 trip
+하는 *유일한* 도구. ReAct 가 spawn 을 호출하면 자식이 exec → 게이트 → 호스트
+y/N 프롬프트가 *agent.py 터미널* 에 직접 뜬다.
+
+```
+you ▸ echo "안녕" 프로세스를 만들어줘
+   💭 spawn 으로 echo 를 띄워야 한다
+   ▶ step 1 · spawn  bin=/echo  argv=['echo', '안녕']
+xv6 ┃ CONFIRM_REQ|7|7|exec                       ← 게스트가 confirm-escape 발화
+[jail] pid=7 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N) y   ← 사용자 입력
+[bridge] CONFIRM_RES → pid=7 y
+xv6 ┃ 안녕                                       ← /echo 실제 실행 결과
+xv6 ┃ [agentd] SPAWN /echo done (status=0)
+╭─ answer ─╮
+│ /echo 가 인자 '안녕' 으로 실행되어 정상 종료됨 (status=0).
+╰──────────╯
+```
+
+**PASS 기준** (4 가지 모두):
+- `[jail] pid=X — 5초 내 허용? (y/N)` 프롬프트가 *agent.py 자체 터미널* 에 출력
+- y 입력 시 `[bridge] CONFIRM_RES → pid=X y` 송신 메시지
+- 게스트 콘솔에 echo 인자 출력 (`xv6 ┃ <argv>`)
+- `[agentd] SPAWN ... done (status=0)` 정상 종료
+
+#### ⑧ confirm-escape — 호스트 n → exec 거부
+
+같은 prompt 를 다시 보내고 이번엔 `n` 으로 거부:
+
+```
+you ▸ echo "위험한거" 프로세스를 만들어줘
+   ▶ step 1 · spawn  bin=/echo  argv=['echo', '위험한거']
+xv6 ┃ CONFIRM_REQ|8|7|exec
+[jail] pid=8 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N) n   ← 사용자 거부
+[bridge] CONFIRM_RES → pid=8 n
+xv6 ┃ [sandbox] pid 8 (agentd): syscall 7 denied (confirm-escape)
+xv6 ┃ [agentd] SPAWN: exec /echo failed
+xv6 ┃ [agentd] SPAWN /echo done (status=1)
+╭─ answer ─╮
+│ exec 가 호스트 거부로 차단됨 (status=1). 자식은 실행되지 않음.
+╰──────────╯
+```
+
+**PASS 기준**:
+- `denied (confirm-escape)` 커널 메시지
+- `SPAWN: exec /echo failed` (자식이 exec 못 했다는 직접 증거)
+- echo 의 인자가 게스트 콘솔에 *출력되지 않음* (인자 실행 자체가 없었음)
+
+> **5 초 안 누르면?** 게스트 측 `CONFIRM_TIMEOUT_TICKS = 50` (≈5 초) 후 자동
+> deny — ⑧ 과 같은 결과. 사용자가 무응답 = 거부.
+
+> **자동 회귀**: `tools/ralph_natlang.py` 의 N8 (y/allow) + N9 (n/deny) 가 위
+> 두 시나리오를 결정적으로 검증. mock 모드에서 17 시나리오 ~50 초.
+
 ### 12.6 mock 모드 활용
 
 `UPSTAGE_API_KEY` 가 없으면 자동으로 mock 모드. 시작 헤더에 `mode: mock`. mock 의 동작:
@@ -1742,10 +2969,12 @@ python3 agent.py
 | WRITE text | 256 byte (`AGENTQ_LEN`) 이상은 잘림 | 마찬가지 |
 | ReAct 한 요청 | 최대 8 step (`MAX_STEPS`) | 복잡 작업은 prompt 쪼개기 |
 | 대화 메모리 | 24 턴 (`MAX_HISTORY`) | 길어지면 컨텍스트 손실 |
-| `kill` / `exec` | jail 의 `agent_blocked()` 가 거부 | 정상 동작 — 보안 가드 |
+| `kill` / `mknod` | jail 의 `agent_blocked()` 가 *confirm-escape* (§11.9) 로 감 — 도구 verb 가 직접 매핑되지 않으므로 자연어 흐름에서 사용자 일회 허용 절차 없이는 발동 불가 | 직접 시험: 게스트 셸에서 `confirm_kill` / `confirm_mknod` 실행 |
+| `exec` (프로세스 생성) | **`spawn` 도구 verb 로 매핑됨** (§11.13) — agentd 가 fork+exec, 자식이 jail 상속 → exec 호출 시 confirm-escape 게이트 trip → 호스트 y/N 프롬프트 | 자연어로 "echo 프로세스를 만들어줘" 같이 요청 → agent.py 가 spawn 도구 호출 → `[jail] pid=X 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N)` 가 호스트 터미널에 뜸 |
 | `nice` 음수 priority | 커널에서 거부 | 사용자급 priority 만 |
 | 비밀 정보 | prompt 가 xv6 콘솔에도 찍힘 | 패스워드/토큰 입력 금지 |
 | 캐시 영속성 | `/cache.bin` 이 xv6 fs.img 안에 영구 저장 — qemu 재시작 만으로는 안 비워짐 | 진짜 클린은 `make -C xv6-riscv clean && make -C xv6-riscv qemu-agent` (`fs.img` 재생성) |
+| Solar 토크나이저 한국어 token boundary | 한글 조사 / quote 와 인접한 ASCII (특히 숫자) 의 token boundary 가 가끔 잘못 잡혀 인접 token 이 dropped (예: `"22 + 45는?"` → LLM 이 *"45"* 누락한 채로 봄, `"echo "안녕""` → "안" 누락). agent.py 내부 path 는 byte-perfect — *Solar API 측 한계*, 코드 fix 불가 (§11.15 진단) | (1) **공백 추가**: `"22 + 45 는?"` 처럼 ASCII 와 한글 사이 공백을 넣으면 거의 항상 보존. (2) **quote 제거**: `echo 안녕 출력해줘` 처럼 자연어로 풀어쓰기. (3) SYSTEM_PROMPT 의 ★ token-boundary clause (§11.15.3) 가 LLM 측 mitigation 신호 |
 
 ### 12.8 디버깅 팁
 
@@ -1753,7 +2982,9 @@ python3 agent.py
 - **`mode: mock` 인데 의도와 다름**: `.env` 의 `UPSTAGE_API_KEY` 가 비어 있거나, `pip install openai` 가 안 됐을 가능성.
 - **`[cache HIT]` 가 안 보임**: 두 가지 흔한 원인 — (1) 평문 경로의 가드 (길이 ≥ 4 글자 & impure 도구 미사용) 미통과. (2) `make clean` 안 한 다른 터미널의 *이전 fs.img 의 `/cache.bin`* 이 살아 있는 경우는 *반대로 항상* hit 가 뜸. 진짜 fresh 상태에서 검증하려면 `make -C xv6-riscv clean && make -C xv6-riscv qemu-agent` 후 다른 포트 (`XV6_PORT=5555`) 로 격리하거나, 게스트 안에서 `ls /cache.bin` 확인.
 - **`unknown cmd` 가 보임**: LLM 이 표 12.3 외의 verb 를 만들어냄 → 보통 한두 번 재시도하면 정상.
-- **회귀 하네스와 동시 실행 불가**: 둘 다 4444 포트를 쓰므로 동시 실행 안 됨. `pkill -9 qemu-system-riscv64` 로 정리 후 한쪽씩.
+- **회귀 하네스와 동시 실행 불가**: 둘 다 4444 포트를 쓰므로 동시 실행 안 됨. `pkill -9 qemu-system-riscv64` 로 정리 후 한쪽씩. *Ralph 26-시나리오 회귀* (§11.10, `tools/ralph_battery.py`) 는 격리 포트 5555 + 자체 `fs.img` 복사본을 써서 4444 의 자연어 세션과 *동시 실행 OK* — 자연어로 테스트하면서 옆에서 회귀 돌릴 수 있음.
+- **한 글자 입력에 키를 여러 번 눌러야 함 / IME (한글) 자모 입력이 화면에 안 보임**: 기본은 *cooked-mode* 입력 (`input()`) 으로 터미널의 line editor + IME 가 자연스럽게 동작. 만약 환경변수 `AGENT_RAW_INPUT=1` 로 raw-mode 를 켰다면 UTF-8 multi-byte 가 *마지막 byte 도착 시점* 까지 화면에 안 표시되므로 자모 단위 입력이 사라지는 듯한 착각이 생긴다 — 해제하려면 그 환경변수만 빼고 다시 실행하면 됨. raw-mode 의 장점은 비동기 xv6 출력이 입력 라인을 침범하지 않게 자동 redraw 한다는 것 — 깨끗한 출력이 우선이라면 raw, 입력 안정성이 우선이라면 cooked.
+- **backspace 로 첫 단어가 안 지워짐 (긴 한글 입력)**: `AGENT_RAW_INPUT=1` raw-mode 에서 `_wipe_input` 의 wrapped-row 계산이 CJK 2-cell wide 글자 boundary 케이스에서 underestimate 했던 버그. §11.16 의 `+1` safety margin fix 로 해결. cooked mode 에서는 발생 안 함 — 그래도 같은 증상이 보이면 `unset AGENT_RAW_INPUT` 후 재실행해서 cooked 로 전환.
 
 ---
 

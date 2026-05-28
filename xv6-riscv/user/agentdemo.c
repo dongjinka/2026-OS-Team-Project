@@ -58,12 +58,24 @@ main(void)
   else
     printf("[demo] FAIL obtained kernel-class priority\n");
 
-  /* 4. Dangerous syscalls are blocked for agent processes. */
-  char *argv[] = { "echo", "x", 0 };
-  if(exec("/echo", argv) < 0)
-    printf("[demo] OK   exec() blocked by sandbox\n");
-  else
-    printf("[demo] FAIL exec() allowed\n");
+  /* 4. Dangerous syscalls go through the confirm-escape gate. fork+exec so
+   *    the demo process itself isn't replaced when allow path runs — that
+   *    way `=== demo done ===` is always reached and tests can sequence. */
+  int pid = fork();
+  if(pid < 0){
+    printf("[demo] FAIL fork() failed\n");
+  } else if(pid == 0){
+    char *argv[] = { "echo", "demo-exec", 0 };
+    exec("/echo", argv);
+    exit(1);                   // exec failed
+  } else {
+    int st = 0;
+    wait(&st);
+    if(st == 0)
+      printf("[demo] OK   exec() ran via confirm-escape allow\n");
+    else
+      printf("[demo] OK   exec() blocked by sandbox\n");
+  }
 
   printf("=== demo done ===\n");
   exit(0);

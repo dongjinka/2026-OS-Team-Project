@@ -28,10 +28,10 @@ jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된
 | F4 | CFS 세부 — fork 상속, wakeup 보너스, 전역 `cfs_min_vruntime` | ✅ |
 | F5 | QEMU ↔ Upstage Solar Python 브릿지 (`.env` 자동 로드) | ✅ |
 | F6 | LLM 응답 JSON 역직렬화 (호스트 측 파싱) | ✅ |
-| F7 | 샌드박싱 — chroot jail + `exec`/`kill`/`mknod` 차단 + 명령 화이트리스트 | ✅ |
+| F7 | 샌드박싱 — chroot jail + `exec`/`kill`/`mknod` **confirm-escape (호스트 y/N)** + 명령 화이트리스트 | ✅ (v2 sleep/wakeup + inline CONFIRM_RES) |
 | F8 | LLM이 다루는 도구별 priority 커스터마이즈 (`SETPRIO` / `LIST`) | ✅ |
-| 보너스 | ReAct 자율 에이전트 루프 + 대화 메모리 | ✅ |
-| F9 | LLM 응답 캐시 | ✅ (cache.c + 커널 `ASK` 오케스트레이션 + `agent.py :ask` 경로 — 히트 시 Solar 호출 생략) |
+| 보너스 | ReAct 자율 에이전트 루프 + 대화 메모리 + **`spawn` 도구 verb** (자연어로 프로세스 생성 → confirm-escape) | ✅ |
+| F9 | LLM 응답 캐시 | ✅ (cache.c + 커널 `ASK` 오케스트레이션 + `agent.py :ask` 경로 — 히트 시 Solar 호출 생략. `_cache_lookup` ↔ `_cache_store` 정규화 동기화) |
 | F10 | 유휴 시간대 LoRA 학습 | ❌ (범위 외 — Future Work) |
 
 ---
@@ -87,7 +87,7 @@ jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된
 
 - **커널**: xv6-riscv (C, RISC-V 64), QEMU 7.2+
 - **사용자 프로그램**: `agentd` (격리 에이전트 런타임), `agentdemo`(F2·F7 데모),
-  `priority_test`(F1·F3 검증)
+  `priority_test`(F1·F3 검증), `confirm_kill`/`confirm_mknod`(confirm-escape gate 검증)
 - **호스트 브릿지**: Python 3, [`openai`](https://pypi.org/project/openai/) SDK
   (Solar API는 OpenAI 호환)
 - **LLM**: Upstage Solar Pro 2 (`UPSTAGE_MODEL=solar-pro2`)
@@ -114,15 +114,23 @@ OS_Project_main/
     │   ├── syscall.{c,h}      # SYS_jail · SYS_agent_recv · agent 차단
     │   ├── sysfile.c          # sys_jail()
     │   ├── sysproc.c          # sys_setpriority 음수 가드, sys_agent_recv
-    │   ├── agentcmd.c         # 명령 큐 + 거부 목록 게이트
-    │   └── console.c          # REQ| 라인 감지 훅
+    │   ├── agentcmd.c         # 명령 큐 + 거부 목록 게이트 + inline CONFIRM_RES
+    │   ├── cache.c            # F9 LLM 응답 캐시 (16-슬롯 RAM + /cache.bin)
+    │   ├── confirm.c          # confirm-escape v2 (sleep/wakeup 기반)
+    │   └── console.c          # REQ| 라인 감지 훅 + payload echo skip (race 차단)
     ├── user/
-    │   ├── agentd.c           # ★ 격리 에이전트 런타임 (jail + 도구 테이블)
-    │   ├── agentdemo.c        # ★ F2·F7 데모 프로그램
+    │   ├── agentd.c           # ★ 격리 에이전트 런타임 (jail + 도구 테이블 + populate_jail + do_spawn)
+    │   ├── agentdemo.c        # ★ F2·F7 데모 (fork+exec 패턴 — confirm-escape allow/deny 양쪽 verify)
+    │   ├── confirm_kill.c     # confirm-escape SYS_kill 게이트 직접 호출
+    │   ├── confirm_mknod.c    # confirm-escape SYS_mknod 게이트 직접 호출
     │   ├── priority_test.c    # F1·F3 단위 테스트
     │   ├── init.c             # 부팅 시 agentd 자동 기동
     │   └── usys.pl, user.h    # jail/agent_recv 스텁
     └── mkfs/mkfs.c            # 디스크 이미지 빌더
+tools/
+├── regression.sh / regression.py   # 9-시나리오 회귀 (수동 셸 명령 자동화)
+├── ralph_battery.py                # 26-시나리오 셸/syscall 자동 회귀 (포트 5555)
+└── ralph_natlang.py                # 39-시나리오 자연어 회귀 (mock 모드, 포트 6666)
 ```
 
 ---
@@ -206,7 +214,10 @@ you ▸ /agentbox 안에 plan.txt 라는 파일을 하나 만들어줘
 you ▸ 지금까지 만든 파일들 목록 보여줘
 you ▸ 그 파일들 내용을 요약해줘
 you ▸ 아까 CFS 얘기 나왔던 파일이 뭐였지?      # ← 대화 메모리에서 답변
-you ▸ :ask 오늘 날씨 어때?                      # ← 커널 캐시 경유(재요청 시 [cache] HIT)
+you ▸ :ask 오늘 날씨 어때?                      # ← 커널 캐시 경유 (재요청 시 [cache HIT])
+you ▸ echo 안녕 출력하는 프로세스 만들어줘      # ← spawn → confirm-escape →
+                                                #    [jail] pid=X — 15초 내 허용? (y/N)
+you ▸ 22 + 45는?                                # ← 동일 prompt 재호출 시 [cache HIT]
 ```
 
 종료는 `Ctrl-D` 또는 `Ctrl-C`. xv6 측은 `make qemu-agent` 터미널에서
@@ -237,12 +248,16 @@ read/write 성공 후 `..`·외부 경로·음수 priority·`exec`·`kill` 차�
 | --------- | ---- |
 | 커널·`fs.img` 빌드, smp=1·smp=3 QEMU 부팅 | ✅ panic 없음 |
 | `priority_test` Test 1/2/3 | ✅ 모두 PASSED |
-| `agentdemo` 체크 5개 (jail read/write, `..` 차단, 음수 priority 거부, `exec`·`kill` 차단) | ✅ 모두 통과 |
-| `REQ\|PRINT\|...`, `REQ\|KILL\|1`(거부), `REQ\|NICE\|2:5`, `REQ\|FOO\|bar`(unknown) | ✅ 기대 동작 |
+| `agentdemo` 체크 5개 (jail read/write, `..` 차단, 음수 priority 거부, exec confirm-escape allow/deny) | ✅ 모두 통과 |
+| `REQ\|PRINT\|...`, `REQ\|NICE\|2:5`, `REQ\|SPAWN\|/echo\|...`, `REQ\|FOO\|bar`(unknown) | ✅ 기대 동작 |
 | 실제 Solar API 멀티스텝 에이전트 시나리오 (write → ls → read × N → 요약 → 대화 메모리 활용) | ✅ 통과 |
+| **`tools/ralph_battery.py`** — 26 셸/syscall 시나리오 자동 회귀 (포트 5555, ~3 min) | ✅ 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 자연어 시나리오 자동 회귀 (mock 모드, 포트 6666, ~50 s) | ✅ 39/39 PASS |
 
-세부 평가 지표(공정성·우선순위 효과·jail 격리·도구 호출 통계)는
-[plan.md §4](plan.md) 참조.
+총 자동 회귀 **65/65 GREEN**. 두 회귀는 격리 포트 + 자체 `fs.img` 복사본을
+써서 4444 사용자 세션과 *동시 실행 OK*.
+
+세부 평가 지표·진단 history·시나리오 카탈로그는 [Project_Guide.md §11](Project_Guide.md) 참조.
 
 ---
 
@@ -274,6 +289,7 @@ read/write 성공 후 `..`·외부 경로·음수 priority·`exec`·`kill` 차�
 
 ## 10. 참조 문서
 
+- [Project_Guide.md](Project_Guide.md) — **종합 가이드** (§1-§10 기초 개념, §11 회귀/디버깅 history, §12 자연어 사용 가이드, §11.15 cache miss fix 진단)
 - [Implementation.md](Implementation.md) — 모듈별 구현 상세, 코드 인용, 와이어 프로토콜
 - [plan.md](plan.md) — 요구사항 매핑, 진행 현황, 평가 지표, 남은 작업
 - [Project_requirements.md](Project_requirements.md) — 과제 요구사항 원문

@@ -191,14 +191,26 @@ consoleintr(int c)
     if(c != 0 && cons.e-cons.r < INPUT_BUF_SIZE){
       c = (c == '\r') ? '\n' : c;
 
-      // echo back to the user.
-      consputc(c);
-
       // store for consumption by consoleread().
       cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
 
       // mirror into the agent sniff buffer (skip overflow: too long to be cmd).
       if(agent_len < AGENT_BUF_SIZE-1) agent_buf[agent_len++] = c;
+
+      // Echo policy: REQ| line 의 payload 는 *echo skip* — agent.py 가 보낼
+      // wire 의 byte 단위 echo 가 다른 동시 출력 (예: agentd 의 printf) 와
+      // interleave 해서 garbled lines (`NT|__OBS6__`) 가 socket 으로 새어
+      // 나가는 race 를 차단. 첫 4 byte (R/E/Q/|) 와 line-terminator (\n) 만
+      // echo 해서 line boundary 는 유지 — agent.py reader 의 split('\n') 이
+      // 정상 동작하고, 송신한 wire 가 인접 출력과 합쳐지지 않음.
+      // 일반 사용자 입력 (REQ| 로 시작 안 함) 은 평소대로 echo.
+      int is_req = (agent_len >= 4 &&
+                    agent_buf[0]=='R' && agent_buf[1]=='E' &&
+                    agent_buf[2]=='Q' && agent_buf[3]=='|');
+      if(!is_req)
+        consputc(c);
+      else if(agent_len <= 4 || c == '\n')
+        consputc(c);    // "REQ|" prefix + line terminator only
 
       if(c == '\n' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
         // Try agent dispatch: if line is "REQ|...\n", consume it and hide

@@ -157,6 +157,8 @@ UPROGS=\
 	$U/_denyctl\
 	$U/_agentdemo\
 	$U/_agentd\
+	$U/_confirm_kill\
+	$U/_confirm_mknod\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
