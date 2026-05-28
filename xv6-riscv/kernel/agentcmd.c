@@ -387,12 +387,46 @@ handle_confirm_res(char *arg)
   confirm_resolve(pid, allow);
 }
 
+// CONFIRM_RES 와이어 inline 처리 — agent_dispatch (interrupt context) 에서
+// 큐 우회. 이유: 큐 drain 은 usertrap 끝에서만 호출되는데, confirm-escape
+// 경로에서는 모든 user proc 이 SLEEPING (자식은 confirm_wait_chan, 부모는
+// wait()) 이라 user trap 이 발생 안 함 → 큐 정체. CONFIRM_RES 처리는
+// sleep/FS 가 없어 (spinlock + wakeup 만) interrupt-safe 하므로 인라인 OK.
+static int
+try_inline_confirm_res(const char *line)
+{
+  // expected: "REQ|[agent:<role>|]CONFIRM_RES|<pid>|<y|n>"
+  if(!(line[0]=='R' && line[1]=='E' && line[2]=='Q' && line[3]=='|')) return 0;
+  const char *cmd = line + 4;
+  // optional role prefix
+  if(cmd[0]=='a' && cmd[1]=='g' && cmd[2]=='e' && cmd[3]=='n' &&
+     cmd[4]=='t' && cmd[5]==':'){
+    const char *bar = cmd + 6;
+    while(*bar && *bar != '|') bar++;
+    if(*bar != '|') return 0;
+    cmd = bar + 1;
+  }
+  // exact "CONFIRM_RES|"
+  const char *want = "CONFIRM_RES|";
+  for(int i = 0; want[i]; i++) if(cmd[i] != want[i]) return 0;
+  const char *arg = cmd + 12;
+  int pid = 0;
+  while(*arg >= '0' && *arg <= '9'){ pid = pid*10 + (*arg - '0'); arg++; }
+  if(*arg != '|' || pid <= 0) return 1;   // consumed (malformed → drop)
+  arg++;
+  int allow = (*arg == 'y' || *arg == 'Y') ? 1 : 0;
+  confirm_resolve(pid, allow);
+  return 1;
+}
+
 // ───────────────── stage-1 enqueue (interrupt-safe) ─────────────────
 // console.c calls this for each "REQ|" line it sniffs from the serial port.
 // Interrupt context — only spinlock-protected enqueue, never sleeps.
 void
 agent_dispatch(char *line)
 {
+  if(try_inline_confirm_res(line)) return;
+
   acquire(&agent_q_lock);
   int next = (agent_q_tail + 1) % AGENT_Q_LEN;
   if(next != agent_q_head){

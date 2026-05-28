@@ -32,6 +32,7 @@ Usage:
 import codecs
 import json
 import os
+import re
 import select
 import socket
 import sys
@@ -146,11 +147,21 @@ def _term_cols() -> int:
 def _wipe_input() -> None:
     """Erase the live input line (prompt + typed text), including any rows it
     wrapped onto, leaving the cursor where the line began. Call holding _LOCK
-    while _input_live is set."""
+    while _input_live is set.
+
+    Row count uses a +1 safety margin: for Hangul (CJK) inputs each character
+    is *2 terminal cells*, and `_disp_width` is an approximation — boundary
+    cases of `(width-1) // cols` can underestimate by exactly one row, which
+    presented to the user as "backspace doesn't erase the first word"
+    (the wrapped first row still showed the prompt + partial input). The
+    extra `\033[1A\033[2K` is harmless when the input fits on one row
+    (we just clear an empty line above the prompt before redrawing).
+    """
+    cols = _term_cols()
     width = _vis_width(_input_prompt) + _disp_width(_input_buf)
-    rows_above = (width - 1) // _term_cols() if width > 0 else 0
+    rows_above = max(0, (width - 1) // cols) if width > 0 else 0
     _raw("\r\033[2K")
-    for _ in range(rows_above):
+    for _ in range(rows_above + 1):   # +1 safety margin for CJK wrap boundary
         _raw("\033[1A\033[2K")
     _raw("\r")
 
@@ -216,10 +227,32 @@ TOOLS (each runs inside the sandbox):
   print  {"msg":"<text>"}  print a message on the xv6 console
   nice   {"pid":<int>,"priority":<int 0..20>}  change a process's priority
   ps                       list running processes (pid, state, priority, name)
+  spawn  {"bin":"<path>","argv":["<a>","<b>",…]}  fork+exec a binary inside
+                                                   the sandbox. The exec call
+                                                   trips the confirm-escape
+                                                   gate — the *host user* is
+                                                   asked y/N before launch.
+                                                   `bin` must be the absolute
+                                                   path of a binary inside the
+                                                   sandbox (e.g. "/echo").
+                                                   argv[0] should repeat the
+                                                   bin basename ("echo");
+                                                   argv[1..] are the runtime
+                                                   args.
   list   list the agent runtime's callable functions and their priorities
   help                     show every command and its argument format
-(There is no "kill" / "exec" — the sandbox blocks them.)
+(`spawn` is the only way to start another process. `kill` is still blocked
+ outright by the sandbox.)
 To change a process's priority with `nice`, first call `ps` to find its pid.
+
+★ Token-boundary rule (applies to ALL tools — chat, write, print, spawn,
+nice args, anywhere user text is echoed or quoted): preserve every byte of
+non-ASCII tokens (Hangul, CJK, emoji) verbatim. Do NOT drop the first
+character of "안녕"/"파일", do NOT let a leading quote merge with the first
+multi-byte code point, and do NOT silently elide numbers inside Korean
+sentences like "22 + 45는" — every digit and Hangul jamo must round-trip
+exactly. If you are unsure, repeat the exact byte sequence the user typed
+rather than paraphrasing.
 
 PROTOCOL — on every step reply with EXACTLY ONE JSON object, nothing else:
   to call a tool:  {"thought":"<short reasoning>","tool":"<name>","args":{...}}
@@ -240,7 +273,23 @@ sandboxed xv6 agent. Reply with EXACTLY ONE JSON object, nothing else:
   {"tool":"<name>","args":{...}}        or
   {"tool":"chat","args":{"msg":"<plain answer>"}}   for a conversational reply.
 Tools: ls | read{"file"} | write{"file","text"} | print{"msg"} | ps |
-       nice{"pid","priority"} | chat{"msg"}. No multi-step planning."""
+       nice{"pid","priority"} | spawn{"bin","argv"} | chat{"msg"}.
+No multi-step planning."""
+
+
+# Payload escape — wire is one *line*, so any embedded newline would split the
+# command on the kernel's console line buffer (and a multi-line WRITE would be
+# half-stored, with the tail being mis-parsed as a shell command). Convention:
+# every wire builder that takes user-supplied text routes it through
+# `_wire_escape`, and agentd un-escapes before use.
+#   \n  → \\n
+#   \r  → dropped (Windows line endings normalised)
+# Backslash itself is NOT doubled — this is a one-direction escape: only the
+# `\n` two-character sequence has special meaning on un-escape. Using a literal
+# backslash inside a wire payload is fine as long as it isn't immediately
+# followed by 'n'; if you really need literal "\n" verbatim, write it twice.
+def _wire_escape(s) -> str:
+    return str(s).replace("\r", "").replace("\n", "\\n")
 
 
 # tool name -> wire payload (the kernel adds nothing; agentd executes it)
@@ -250,11 +299,24 @@ def wire_for(tool: str, args: dict):
         if tool == "list":  return "LIST|"
         if tool == "ps":    return "PS|"
         if tool == "help":  return "HELP|"
-        if tool == "chat":  return f"CHAT|{args.get('msg','')}"
+        if tool == "chat":  return f"CHAT|{_wire_escape(args.get('msg',''))}"
         if tool == "read":  return f"READ|{args['file']}"
-        if tool == "write": return f"WRITE|{args['file']}:{args.get('text','')}"
-        if tool == "print": return f"PRINT|{args.get('msg','')}"
+        if tool == "write": return f"WRITE|{args['file']}:{_wire_escape(args.get('text',''))}"
+        if tool == "print": return f"PRINT|{_wire_escape(args.get('msg',''))}"
         if tool == "nice":  return f"NICE|{int(args['pid'])}:{int(args['priority'])}"
+        if tool == "spawn":
+            # Wire: "SPAWN|<bin>|<arg0> <arg1> ..." — spaces separate argv.
+            # bin must be a non-empty string; argv defaults to [bin] when omitted
+            # (i.e. argv[0] == bin) so the spawned binary always has at least
+            # one arg, matching the convention of exec().
+            bin_ = str(args.get("bin", "")).strip()
+            if not bin_:
+                return None
+            argv = args.get("argv")
+            if not isinstance(argv, list) or not argv:
+                argv = [bin_]
+            argv_str = " ".join(str(a) for a in argv)
+            return f"SPAWN|{bin_}|{argv_str}"
     except (KeyError, ValueError, TypeError):
         return None
     return None
@@ -303,22 +365,39 @@ def _drain_escape(fd: int) -> None:
 def _read_line(prompt: str) -> str:
     """Read one REPL line.
 
-    On a real terminal this is a raw-mode line editor that owns its own
-    buffer and redraws the whole input line on every change. Because the
-    buffer is ours, backspace is just `buf[:-1]` + redraw — it can never
-    strand the first character. Concurrent xv6 output is printed via
-    _wipe_input / _draw_input, so async writes never desync the input.
+    Two modes:
+      * cooked (default) — terminal's own line editor + IME stays visible.
+        Async xv6 output may interleave with the prompt, but typed bytes
+        ALWAYS reach Python; this matches the behavior most users expect.
+      * raw (opt-in via AGENT_RAW_INPUT=1) — our own line editor with
+        _wipe_input / _draw_input to keep the prompt pinned to one line.
+        Faster visual updates but multi-byte (UTF-8 / IME) input only
+        renders after the last byte arrives — which can feel like "the
+        key didn't register, let me press it again."
 
-    On a non-tty (piped input, tests) it falls back to plain input()."""
+    On a non-tty (piped input, tests) the function always uses input()."""
     global _cursor, _input_live, _input_buf, _input_prompt
 
-    if termios is None or not sys.stdin.isatty():
+    use_raw = (termios is not None
+               and sys.stdin.isatty()
+               and os.environ.get("AGENT_RAW_INPUT", "").strip() in ("1", "true", "yes"))
+
+    if not use_raw:
         with _LOCK:
             if _cursor != "start":
                 _raw(_RST + "\n")
             _raw("\n" + prompt)
+            # Flush the prompt to the terminal *before* input() takes over —
+            # without this, the prompt can sit in stdout buffer and the
+            # terminal's notion of the line-start column drifts from what
+            # the user sees, which propagates to incorrect backspace
+            # behavior (especially noticeable with CJK input).
+            sys.stdout.flush()
             _cursor = "other"
-        return input()
+        try:
+            return input()
+        except (EOFError, KeyboardInterrupt):
+            raise
 
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
@@ -412,6 +491,10 @@ class Agent:
         self.capturing = False
         self.capture_buf = ""
         self._seq = 0
+        # Mock-only multi-step chain flag — set by _mock_step's write branch
+        # when the prompt also says "다시"/"읽어", cleared on the next
+        # OBSERVATION step which returns a read tool call. Drives N14.
+        self._mock_step_after_write = False
 
         # kernel F9 cache RPC — the reader thread hands each "RESP|" line
         # (a CACHE_GET / CACHE_SET reply) to whoever waits on _resp_event.
@@ -427,7 +510,11 @@ class Agent:
         self.role = "user"
 
         self.api_key = os.environ.get("UPSTAGE_API_KEY")
-        self.mock = self.api_key is None
+        # Empty / whitespace-only key is treated the same as unset — both are
+        # equally non-functional, and treating "" as mock lets test harnesses
+        # force mock mode by setting UPSTAGE_API_KEY="" without having to
+        # touch the on-disk .env file.
+        self.mock = not (self.api_key and self.api_key.strip())
         self.client = None
         self.model = os.environ.get("UPSTAGE_MODEL", DEFAULT_MODEL)
         if not self.mock:
@@ -624,11 +711,58 @@ class Agent:
     def _mock_step(self):
         """A dumb stand-in for the LLM: one tool call, then an answer."""
         last = self.messages[-1]["content"]
+        # ── N14 multi-step chain — must come *before* the generic OBSERVATION
+        #    answer branch below, otherwise write→OBSERVATION → immediate answer
+        #    and the second tool call (read) is never issued.
+        if self._mock_step_after_write and last.startswith("OBSERVATION"):
+            self._mock_step_after_write = False
+            return {"thought": "(mock) read after write",
+                    "tool": "read", "args": {"file": "/mock_multi.txt"}}
         if last.startswith("OBSERVATION"):
             body = last.split("\n", 1)[1] if "\n" in last else ""
             return {"thought": "(mock) returning observation",
                     "answer": "(mock mode — no LLM)\n" + body}
         t = last.lower()
+        # ── N16 kill — checked *before* spawn so "종료" doesn't fall through to
+        #    the echo spawn. Triggers confirm-escape via /kill.
+        if any(w in t for w in ("종료", "kill")):
+            return {"thought": "(mock) kill via spawn",
+                    "tool": "spawn",
+                    "args": {"bin": "/kill", "argv": ["kill", "999"]}}
+        # ── N15 nice ACL — a "priority"/"우선순위" prompt that mentions a
+        #    negative number triggers a nice() with priority=-3 (always denied
+        #    by the kernel's user-class guard).
+        if ("priority" in t or "우선순위" in t) and re.search(r"-\s*\d", last):
+            return {"thought": "(mock) nice negative — should be denied",
+                    "tool": "nice", "args": {"pid": 1, "priority": -3}}
+        # ── N11 greeting — a short "안녕..." prompt → chat (PURE) → cacheable.
+        if t.strip().startswith("안녕") and len(t.strip()) < 12:
+            return {"thought": "(mock) greeting",
+                    "tool": "chat", "args": {"msg": "안녕하세요! (mock)"}}
+        # ── N17 hangul argv — verbatim multi-byte preservation regression.
+        if "안녕세상" in last:
+            return {"thought": "(mock) spawn echo hangul argv",
+                    "tool": "spawn",
+                    "args": {"bin": "/echo", "argv": ["echo", "안녕세상"]}}
+        # ── existing spawn intent
+        if any(w in t for w in ("spawn", "프로세스", "실행", "process", "run ")):
+            return {"thought": "(mock) spawn echo",
+                    "tool": "spawn",
+                    "args": {"bin": "/echo", "argv": ["echo", "(mock spawned)"]}}
+        # multi-line WRITE 시연 — wire 의 newline-escape 동작 확인용. 본문은
+        # 일부러 \n 을 포함해 escape ↔ unescape 라운드트립이 회귀에서 결정적.
+        if any(w in t for w in ("작성", "쓰기", "write file", "wrote 1")):
+            # If the prompt also says "읽어" / "다시", arm the chain flag so the
+            # next OBSERVATION step auto-reads (N14).
+            if any(w in t for w in ("다시", "읽어", "확인")):
+                self._mock_step_after_write = True
+            return {"thought": "(mock) multi-line write",
+                    "tool": "write",
+                    "args": {"file": "/mock_multi.txt",
+                             "text": "line1\nline2\nline3"}}
+        if any(w in t for w in ("읽어", "read ", "내용")):
+            return {"thought": "(mock) read back",
+                    "tool": "read", "args": {"file": "/mock_multi.txt"}}
         if any(w in t for w in ("file", "파일", "list", "목록", "ls", "wrote", "쓴")):
             return {"thought": "(mock) list files", "tool": "ls", "args": {}}
         return {"thought": "(mock) print it", "tool": "print",
@@ -664,7 +798,7 @@ class Agent:
 
     def _handle_confirm_req(self, line: str) -> None:
         """게스트가 위험 syscall 차단 시도 시 보낸 CONFIRM_REQ 라인을 받아
-        사용자에게 y/N 을 묻고 CONFIRM_RES 로 회신. 5초 안에 응답 없으면
+        사용자에게 y/N 을 묻고 CONFIRM_RES 로 회신. 15초 안에 응답 없으면
         커널 측 timeout 으로 자동 거부됨."""
         # `CONFIRM_REQ|<pid>|<call>|<summary>` — call/summary 둘 다 있을 수 있고
         # summary 가 비어 있을 수도. split 결과 길이가 3 또는 4.
@@ -674,8 +808,20 @@ class Agent:
         pid = parts[1]
         call = parts[2]
         summary = parts[3] if len(parts) >= 4 else ""
+
+        # stdin buffer drain — ReAct 가 도구 호출 시작한 후 사용자가 (무의식적
+        # 으로) enter 한 번 친 빈 line 같은 *stale 입력* 이 OS line buffer 에
+        # 남아 있을 수 있다. drain 안 하면 우리 input() 이 그 빈 line 을 즉시
+        # 받아서 "n" 으로 해석 — 사용자가 본 적도 없는 prompt 에 강제 deny.
+        # TTY 일 때만 시도 — pipe stdin (회귀) 은 의도된 line 만 들어옴.
+        try:
+            if sys.stdin.isatty() and termios is not None:
+                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+        except Exception:
+            pass
+
         prompt = (f"\n[jail] pid={pid} 가 위험 syscall '{summary or call}' 호출 요청 "
-                  f"— 5초 내 허용? (y/N) ")
+                  f"— 15초 내 허용? (y/N) ")
         try:
             ans = input(prompt)
         except (EOFError, KeyboardInterrupt):
@@ -701,8 +847,15 @@ class Agent:
         """Return a cached answer for `question`, or None on miss.
 
         The kernel matches exactly (FNV-1a) and then semantically (MinHash /
-        Jaccard), so a paraphrase of an earlier question can still hit."""
-        key = question.replace("\n", " ").replace("\r", " ")
+        Jaccard), so a paraphrase of an earlier question can still hit.
+
+        Key normalization MUST match `_cache_store` byte-for-byte — same
+        replace + strip — otherwise the FNV-1a hash diverges and a stored
+        prompt is never found on lookup, even when the user types the
+        exact same string. (This was the regression behind the user-reported
+        "same prompt 3 times, no [cache HIT]" issue — fix is the .strip()
+        below mirroring the store path.)"""
+        key = question.replace("\n", " ").replace("\r", " ").strip()
         wire = "REQ|CACHE_GET|" + key
         if len(wire.encode("utf-8")) > WIRE_MAX:   # over the kernel line limit
             return None

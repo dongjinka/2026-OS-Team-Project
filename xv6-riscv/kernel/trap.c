@@ -188,6 +188,10 @@ clockintr()
     ticks++;
     wakeup(&ticks);
     release(&tickslock);
+    // confirm-escape v2: pending confirm 가 있으면 매 tick 명시적으로 깨움.
+    // `wakeup(&ticks)` 만으로 충분해야 하지만 SMP+CFS-wakeup-vruntime 조합
+    // 에서 lost-wakeup 이 관찰돼 명시적 broadcast 추가.
+    confirm_tick();
   }
 
   // ask for the next timer interrupt. this also clears

@@ -12,8 +12,16 @@
 //   4. 게스트의 confirm_request() 가 wakeup 되어 결과를 syscall() 에 반환.
 //   5. timeout (5초) 시 자동 거부.
 //
-// v1 의 제약: 한 번에 *하나만* 처리 — 다른 confirm 이 이미 대기 중이면
-// 새 요청은 즉시 거부. 미래에 큐로 확장 가능.
+// v2 노트 — yield-polling → sleep/wakeup 전환:
+//   v1 은 매 iteration 에 yield() 로 CPU 양보 → 호스트 응답 polling. 이 패턴
+//   에서 kerneltrap panic (scause=0xf, sp 가 유저 영역값) 이 관찰돼 비활성화.
+//   v2 는 표준 sleep(&ticks, &confirm_lock) 으로 — clockintr() 가 매 tick
+//   `wakeup(&ticks)` 를 호출하므로 자동으로 ≤10ms latency 로 깨어남 (timeout
+//   도 같은 매커니즘으로 동작). confirm_resolve() 가 즉시 `wakeup(&ticks)`
+//   를 추가 호출해 sub-tick latency 보장.
+//
+// v1 의 제약은 그대로: 한 번에 *하나만* 처리 — 다른 confirm 이 이미 대기
+// 중이면 새 요청은 즉시 거부. 미래에 큐로 확장 가능.
 
 #include "types.h"
 #include "param.h"
@@ -23,13 +31,15 @@
 #include "proc.h"
 #include "defs.h"
 
-#define CONFIRM_TIMEOUT_TICKS 50    // 약 5초 (1 tick ≈ 100ms)
+#define CONFIRM_TIMEOUT_TICKS 150   // 약 15초 (1 tick ≈ 100ms). 사용자가
+                                    // prompt 를 읽고 결정할 충분한 시간.
 
 static struct spinlock confirm_lock;
 static int confirm_pending_pid;     // 대기 중인 syscall 의 pid (0 = idle)
 static int confirm_result;          // -1=pending, 1=allow, 0=deny
+static char confirm_wait_chan;      // sleep 채널 (전용 — &ticks 와 분리)
 
-// extern from trap.c — 시스템 ticks 카운터 (tick polling 용)
+// extern from trap.c — 시스템 ticks 카운터 (timeout 체크)
 extern uint ticks;
 extern struct spinlock tickslock;
 
@@ -44,9 +54,10 @@ confirminit(void)
 // 동기 호출 — 호스트의 응답 또는 timeout 까지 대기.
 // 반환: 1=allow, 0=deny.
 //
-// 구현 노트: xv6 의 sleep() 은 timeout 자체 지원 X. 단순 yield 기반
-// polling 으로 — 매 라운드에 lock 잡아 검사, 다음 라운드는 yield() 로
-// CPU 양보. 다른 프로세스 (특히 agentcmd 큐 처리) 가 진행할 수 있음.
+// 구현 노트: `sleep(&ticks, &confirm_lock)` 를 사용 — clockintr() 가 매 tick
+// `wakeup(&ticks)` 를 호출하므로 ≤10ms 마다 자연 wake. wake 후 timeout 검사 +
+// confirm_result 검사 → 만족하면 종료, 아니면 다시 sleep. confirm_resolve()
+// 도 같은 채널로 즉시 wakeup → sub-tick latency.
 int
 confirm_request(int call_num, const char *summary)
 {
@@ -68,32 +79,39 @@ confirm_request(int call_num, const char *summary)
   release(&tickslock);
 
   int rc = 0;
+  acquire(&confirm_lock);
   for(;;){
-    acquire(&confirm_lock);
     if(confirm_result != -1){
-      rc = confirm_result;
-      release(&confirm_lock);
+      rc = (confirm_result == 1) ? 1 : 0;
       break;
     }
-    release(&confirm_lock);
 
+    // timeout 체크 — tickslock 짧게 잡고 즉시 해제
     acquire(&tickslock);
-    int elapsed = (int)(ticks - t0);
+    uint elapsed = ticks - t0;
     release(&tickslock);
-    if(elapsed >= CONFIRM_TIMEOUT_TICKS) break;   // timeout → rc=0 (deny)
+    if(elapsed >= CONFIRM_TIMEOUT_TICKS) break;  // rc=0 (deny by timeout)
 
-    yield();    // CPU 양보 — scheduler 가 다른 RUNNABLE 프로세스 실행
+    // 전용 채널 sleep — clockintr 의 confirm_tick() 가 매 tick wakeup.
+    sleep(&confirm_wait_chan, &confirm_lock);
   }
-
-  acquire(&confirm_lock);
   confirm_pending_pid = 0;
   confirm_result = -1;
   release(&confirm_lock);
   return rc;
 }
 
+// timer-tick broadcast — clockintr() 가 매 tick 호출. pending 이 있을 때만
+// wakeup 하여 불필요한 lock contention 회피.
+void
+confirm_tick(void)
+{
+  if(confirm_pending_pid != 0)
+    wakeup(&confirm_wait_chan);
+}
+
 // 호스트 응답 도착 — agentcmd.c 의 CONFIRM_RES 와이어 핸들러가 호출.
-// 대기 중인 pid 와 일치할 때만 결과 set. wakeup(&ticks) 로 즉시 깨워 반응성 ↑.
+// 대기 중인 pid 와 일치할 때만 결과 set. wakeup 으로 즉시 깨워 반응성 ↑.
 void
 confirm_resolve(int pid, int allow)
 {
@@ -102,7 +120,5 @@ confirm_resolve(int pid, int allow)
     confirm_result = allow ? 1 : 0;
   }
   release(&confirm_lock);
-  // 매 tick 깨어남 이미 보장됨 — 추가 wakeup 없어도 다음 tick 에 응답. 단
-  // 즉시 반응을 위해 명시적 wakeup(&ticks) 가능하지만 다른 sleep 까지 깨워
-  // 사이드 이펙트 — 생략.
+  wakeup(&confirm_wait_chan);
 }
