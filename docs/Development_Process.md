@@ -80,10 +80,10 @@ in-kernel IPC queue, and the file system — see
 | **10** | ~05-05 | Problem statement + system sketch | Weekly-progress docs; **host↔xv6 socket** prototype (05-06); Solar API + REPL (05-11) |
 | **11** | ~05-12 | Minimal working prototype | **CFS scheduler + command dispatcher** integrated into xv6 (05-11); course-requirements doc added |
 | **12** | ~05-19 | Integrated prototype + ≥1 eval metric | **Core LLM-OS features** (CFS/priority/sandbox/agent loop, 05-18); **jail-based sandbox** rewrite (05-21); **F9 cache** + security guards (05-22); **eval automation** Test 3 + `cfs_share`, CHANGELOG, Implementation.md rewrite (05-20) |
-| **13** | ~05-26 | Evaluation results + dry-run | **9-test regression harness** + 3 latent-bug fixes (05-26); host-confirm escape for exec/kill; agent.py REPL/Unicode fixes |
-| **14** | ~06-02 | **Final presentation** (English) | Final deliverables: README, Technical Report, Development Process, English slides |
+| **13** | ~05-26 → 05-28 | Evaluation results + dry-run | **9-test regression harness** + 3 latent-bug fixes (05-26); host-confirm escape for exec/kill; agent.py REPL/Unicode fixes. Then (05-28, `574c3d7`) **natural-language agent hardening**: confirm-escape v2 re-enabled (sleep on `&confirm_wait_chan` + `clockintr` timeout + inline `try_inline_confirm_res`), `spawn` tool verb + `populate_jail()`, `_cache_lookup` strip fix (Issue A), `console.c` REQ\| payload echo skip, wire newline escape, `agentdemo` fork+exec rewrite, **two regression harnesses** (`tools/ralph_battery.py` 26 shell/syscall + `tools/ralph_natlang.py` 39 natural-language) — cumulative **65/65 PASS**. English deliverables added (05-28, `8ee2db7`): `README.en.md`, `docs/Technical_Report.md`, `docs/Development_Process.md`. |
+| **14** | ~06-02 | **Final presentation** (English) | Document-sync pass (05-31, `b51938a`) — propagated 574c3d7 changes into the auxiliary docs (`CHANGELOG.md`, `Implementation.md`, `Weekly_Development_Process.md`, `README.en.md`). Remaining: English slides, demo capture, final branch merge. |
 
-*(KR: 오늘 기준(2026-05-28)은 Week 13. 남은 일: 영어 슬라이드, 데모 캡처,
+*(KR: 오늘 기준(2026-05-31)은 Week 14. 남은 일: 영어 슬라이드, 데모 캡처,
 브랜치 통합·최종 머지.)*
 
 ---
@@ -118,9 +118,39 @@ in-kernel IPC queue, and the file system — see
   the `.gitignore` build breakage.
 
 **Week 13 — hardening & dry-run (lead: Se-Joong)**
-- Se-Joong: added a **9-case regression harness**, found and fixed **3 latent
-  bugs**; upgraded the agent confirm/timeout behavior; fixed REPL line-editing
-  and multibyte-output corruption in `agent.py`.
+- Se-Joong (05-26): added a **9-case regression harness**, found and fixed
+  **3 latent bugs**; upgraded the agent confirm/timeout behavior; fixed REPL
+  line-editing and multibyte-output corruption in `agent.py`.
+- Se-Joong (05-28, `574c3d7`): **natural-language agent stabilization**.
+  Confirm-escape v2 re-enabled with a dedicated `&confirm_wait_chan` and a
+  `clockintr`-driven `confirm_tick` (15 s default-deny), plus an inline
+  `try_inline_confirm_res()` that bypasses the dispatch queue so the host's
+  `y/n` reaches the gate even when every user process is `SLEEPING`. A new
+  **`spawn` tool verb** turns natural-language "make a process that …" into a
+  real fork+exec (gated by confirm-escape). `populate_jail()` hard-links
+  `/echo`, `/sh`, `/cat`, `/ls`, etc. into `/agentbox` before `jail()`.
+  Critical bug fixes: `_cache_lookup` now `.strip()`s the lookup key (Issue
+  A — same prompt now produces `[cache HIT]` from the second call);
+  `console.c` skips echoing `REQ|` payload bytes (the wire-byte echo had
+  been byte-racing with `consolewrite` output and corrupting the socket
+  stream); wire `\n` is now escaped through `_wire_escape` →
+  `unescape_inplace` so multi-line `WRITE` doesn't truncate. Two new
+  regression harnesses — `tools/ralph_battery.py` (26 shell/syscall
+  scenarios, isolated port 5555) and `tools/ralph_natlang.py` (39
+  natural-language scenarios, mock-mode `agent.py`, port 6666) — together
+  prove **65/65 PASS**. Both harnesses run on isolated ports with per-run
+  `fs.img` copies so they can run alongside an interactive 4444 session.
+- Se-Joong (05-28, `8ee2db7`): **English deliverables added** — `README.en.md`,
+  `docs/Technical_Report.md`, `docs/Development_Process.md`.
+
+**Week 14 — final prep (lead: all)**
+- Document-sync pass (05-31, `b51938a` + follow-up): propagated the 574c3d7
+  changes into the auxiliary docs that were authored *before* it on the same
+  day (`CHANGELOG.md` `[2026-05-28]` section; `Implementation.md` §3.5–§3.7
+  / §4.6 / §4.7 / §6 / §7.3–§7.4 / §8 file map; `Weekly_Development_Process.md`
+  Week 11–14; `README.en.md` F7/tree/verification/limitations rows), and
+  re-synced the English `docs/Technical_Report.md` + `docs/Development_Process.md`
+  with the v2 confirm-escape state and the ralph 65/65 figure.
 
 ### 4.2 Evaluation metrics defined
 
@@ -129,9 +159,13 @@ in-kernel IPC queue, and the file system — see
 - **Fairness (quantitative):** `cfs_share` reports CPU-share % per priority
   (run with `CPUS=1`).
 - **Sandbox:** `agentdemo` confirms jail confinement, `..`/outside-path denial,
-  privilege-escalation denial, and `exec`/`kill` blocking.
+  privilege-escalation denial, and **`exec` confirm-escape (host y/N, allow + deny + timeout default-deny)**. `confirm_kill` and `confirm_mknod` exercise the corresponding gates directly.
 - **Agent loop:** multi-step tool-call success + conversation-memory reuse on a
   live Solar session.
+- **Automated regression:** `tools/ralph_battery.py` covers 26 shell/syscall
+  scenarios; `tools/ralph_natlang.py` covers 39 natural-language scenarios
+  through `agent.py` in mock mode. Together: **65/65 PASS** (CI-style; runs in
+  ~3 min + ~50 s on isolated qemu instances).
 
 ---
 
@@ -163,14 +197,22 @@ in-kernel IPC queue, and the file system — see
 - **Action items:** June → evaluation automation + docs; SeungBeom → security
   guards; Se-Joong → jail rewrite + cache.
 
-### M4 — Week 13 · Hardening & dry-run (around 2026-05-26)
+### M4 — Week 13 · Hardening & dry-run (around 2026-05-26 → 05-28)
 - **Attendees:** `[fill in]`
 - **Decisions:** add a regression harness before the dry-run; gate dangerous
   syscalls behind a one-time host confirmation; freeze scope (F9 in, F10 out).
-- **Action items:** fix the 3 latent bugs; prepare the English slides and demo
-  capture; **merge all branches for the final deliverable**.
+  After the v1 confirm-escape panic surfaced in the 9-test harness, **redesign
+  confirm-escape to v2** (dedicated channel sleep + `clockintr`-driven timeout
+  + inline `CONFIRM_RES`) instead of leaving it disabled; add a **`spawn`
+  tool verb** so natural-language "make a process" reaches a real `exec` (and
+  thereby exercises the new gate); build two complementary regression
+  harnesses — one shell-level, one natural-language — to lock the behavior.
+- **Action items:** fix the 3 latent bugs; ship `574c3d7` (v2 + spawn + cache
+  fix + 65/65); ship `8ee2db7` (English deliverables); prepare the English
+  slides and demo capture; **merge all branches for the final deliverable**.
 
 ### M5 — Week 14 · Final prep `[fill in]`
+- Documentation sync (auxiliary KR/EN docs aligned with `574c3d7`).
 - Rehearse the English presentation; finalize README demo media.
 
 ---
@@ -189,9 +231,14 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 | 6 | **Security:** `NICE` lacked a permission guard; `sys_procinfo` leaked stack data | Added the NICE guard; blocked the stack exposure | SeungBeom · 05-22 |
 | 7 | Unknown latent defects before the dry-run | **9-test regression harness** surfaced **3 bugs**, all fixed | Se-Joong · 05-26 |
 | 8 | Raw-mode REPL left a residual first character on backspace | Rewrote the line editor | Se-Joong · 05-26 |
-| 9 | Confirm-escape branch caused a `kerneltrap` **panic** | Temporarily disabled that branch to keep the kernel stable | Se-Joong · 05-26 |
+| 9 | Confirm-escape v1 branch caused a `kerneltrap` **panic** | First temporarily disabled to keep the kernel stable (05-26), then **re-designed as v2** — dedicated `&confirm_wait_chan` sleep + `clockintr`-driven `confirm_tick` timeout + inline `try_inline_confirm_res()` that bypasses the queue. Now active (05-28, `574c3d7`). | Se-Joong · 05-26 → 05-28 |
 | 10 | `agent.py` tool calls timed out under slow API responses | Raised timeout 12 s → 24 s + one marker retry | Se-Joong · 05-26 |
 | 11 | F6 proposal said "parse JSON in the kernel," which conflicts with xv6's no-float/no-heap rules and kernel safety | **Decision:** parse on the host; document the rationale in the report | June · 05-20 |
+| 12 | `_cache_lookup` missed even on identical repeated prompts (Issue A) | `agent.py` `_cache_lookup` now `.strip()`s the lookup key to match `_cache_store`'s normalization; FNV-1a hashes now agree. Verified by `ralph_natlang.py` N11 / N13. | Se-Joong · 05-28 |
+| 13 | `echo "안녕"` failed: `echo failed` + first byte dropped | Two causes. (a) `/agentbox/` was empty so `exec` had no binary → added `populate_jail()` to hard-link `echo`/`sh`/`cat`/... before `jail()`. (b) `consoleintr` was echoing the wire payload byte-by-byte, byte-racing with `consolewrite` and corrupting the socket stream → REQ\| payload echo skip in `console.c`. | Se-Joong · 05-28 |
+| 14 | Confirm-escape prompt was answered with stale `\n` from prior input and auto-denied without showing the prompt | (a) Timeout extended 5 s → 15 s. (b) `agent.py:_handle_confirm_req` now calls `termios.tcflush(TCIFLUSH)` before `input()` to drain stale stdin. (c) `sh` added to `populate_jail()` for `SPAWN /sh` paths. | Se-Joong · 05-28 |
+| 15 | Multi-line `/plan.txt TODO 1\nTODO 2` was truncated on the wire | `agent.py:_wire_escape` escapes `\n` → `\\n` for `chat`/`write`/`print`; `user/agentd.c:unescape_inplace` restores it before writing. | Se-Joong · 05-28 |
+| 16 | Solar tokenizer dropped `45` in `"22 + 45는?"` (Korean particle abutting a number) | Not fixable in code — LLM-side. Mitigation: standalone `★ token-boundary` clause in `SYSTEM_PROMPT` covering all tools; documented as a known limitation. | Se-Joong · 05-28 |
 
 ---
 
@@ -199,21 +246,32 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 
 ### What went well *(잘된 점)*
 - **Real OS mechanisms, not a wrapper.** CFS, priority classes, a chroot jail,
-  an in-kernel command queue, and new syscalls are all genuinely in the kernel.
-- **Defense in depth.** Three independent layers (deny-list → blocked syscalls →
-  jail) bound what the LLM can do.
+  an in-kernel command queue, confirm-escape sleep/wakeup on a dedicated
+  channel, and new syscalls are all genuinely in the kernel.
+- **Defense in depth.** Three mechanical layers (deny-list → confirm-escape
+  gate on dangerous syscalls → jail) plus a **human-in-the-loop** boundary
+  (host operator must answer `y` for `exec`/`kill`/`mknod`).
 - **PR + personal-branch workflow** kept the trunk buildable and gave every
   change a review.
-- **Evaluation is automated** (Test 3 pass/fail, `cfs_share` numbers), not just
-  eyeballed — and a regression harness caught real bugs before the dry-run.
+- **Evaluation is fully automated.** Two complementary harnesses
+  (`ralph_battery` for shell/syscall, `ralph_natlang` for natural-language
+  through `agent.py`) sum to **65/65 PASS**, both runnable in parallel with
+  an interactive session thanks to per-run isolated ports + `fs.img` copies.
 
 ### What was hard *(어려웠던 점)*
 - Interrupt-context constraints (no fork/file-I/O in `consoleintr`) forced the
   queue + worker split.
 - xv6's no-float / no-dynamic-allocation rules shaped several decisions (F6,
   integer-only CFS math, fixed-size buffers).
-- Kernel-stability regressions (boot order, confirm-escape panic) cost real time
-  and motivated the regression harness.
+- Kernel-stability regressions (boot order, confirm-escape v1 panic) cost real
+  time. v2 took a fundamentally different approach (dedicated channel +
+  clockintr broadcast + inline response) because the v1 yield-poll wakeup
+  had no safe answer.
+- **Byte-level races on the serial wire.** `consoleintr` echoing `REQ|`
+  payload bytes while `consolewrite` was emitting agentd output produced
+  garbled lines like `NT|__OBS6__` on the socket — visible only because
+  `ralph_natlang.py` watched the wire. Fix: skip echoing `REQ|` payload,
+  keep only the prefix and newline.
 
 ### What we'd do differently *(개선점)*
 - Add the regression harness **earlier** — several latent bugs would have been

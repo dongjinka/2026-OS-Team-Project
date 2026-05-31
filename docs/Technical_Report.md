@@ -66,15 +66,20 @@ The guiding invariant throughout:
  │    ├─ ASK ─► F9 cache lookup                                       │
  │    │         · HIT  → forward answer to agentd (Solar skipped)     │
  │    │         · MISS → LLM_REQ to host ─► LLM_RESP ─► cache_set     │
+ │    ├─ CONFIRM_RES ─► try_inline_confirm_res (wake &confirm_wait_chan) │
  │    └─ else ─► deny-list check (configurable) ─► agentq enqueue     │
  │                                   │ sys_agent_recv (is_agent only) │
  │                                   ▼                                │
  │   ┌────────────────────────────────────────────────────────────┐ │
  │   │  user/agentd   (jailed: chroot=/agentbox, is_agent=1)       │ │
  │   │   tools: PRINT CHAT READ WRITE LS NICE LIST SETPRIO PS HELP │ │
- │   │   exec / kill / mknod → denied                             │ │
+ │   │          + SPAWN (fork+exec → confirm-escape on exec)       │ │
+ │   │   exec / kill / mknod → confirm-escape gate (host y/N, 15s) │ │
  │   │   before each tool: setpriority(self, fn.priority)          │ │
  │   └────────────────────────────────────────────────────────────┘ │
+ │                                                                    │
+ │   confirm.c  (sleep on &confirm_wait_chan; clockintr → confirm_tick │
+ │               timeout 15s = default deny)                          │
  │                                                                    │
  │   ┌────────────────────────────────────────────────────────────┐ │
  │   │  CFS scheduler  — cfs_weight[41] · vruntime ·              │ │
@@ -91,8 +96,8 @@ The guiding invariant throughout:
 | AIOS responsibility | Our mechanism | Files |
 | ------------------- | ------------- | ----- |
 | **Agent Scheduler** | In-kernel CFS with Linux weights; new processes seeded at global `min_vruntime` | `kernel/proc.c`, `kernel/trap.c` |
-| **Tool Manager** | 2-stage command dispatch + configurable deny-list + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/sysproc.c`, `user/agentd.c` |
-| **LLM-Kernel bridge** | Host ReAct loop over the QEMU serial port; `REQ\|` wire protocol; observation markers; `:ask` cache path | `agent.py` |
+| **Tool Manager** | 2-stage command dispatch + configurable deny-list + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration + **confirm-escape v2** gate for `exec`/`kill`/`mknod` + **`spawn` tool verb** | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/confirm.c`, `kernel/sysproc.c`, `user/agentd.c` |
+| **LLM-Kernel bridge** | Host ReAct loop over the QEMU serial port; `REQ\|` wire protocol; observation markers; `:ask` cache path; **`CONFIRM_REQ`/`CONFIRM_RES` host y/N handler** | `agent.py` |
 
 ---
 
@@ -105,7 +110,7 @@ The guiding invariant throughout:
 | Transport | QEMU `-serial tcp:127.0.0.1:4444` | Lets a host process speak to the kernel console |
 | Host bridge | Python 3 + `openai` SDK | Solar is OpenAI-API-compatible (swap `base_url`/`api_key`) |
 | LLM | Upstage Solar Pro (`solar-pro2`) | Course-provided backend |
-| Build / test | GNU Make; `tools/regression.py` | xv6 build + a multi-case regression harness |
+| Build / test | GNU Make; `tools/ralph_battery.py` (26 shell/syscall scenarios) + `tools/ralph_natlang.py` (39 natural-language scenarios, mock mode) | xv6 build + **65/65 automated regression**; both harnesses run on isolated ports (5555 / 6666) with per-run `fs.img` copies so they don't disturb an interactive 4444 session |
 
 No floating point and no dynamic allocation are used in any kernel-side
 addition — both are restricted in xv6, so all new kernel code uses fixed-size
@@ -181,8 +186,17 @@ argument-fetch + dispatch path.
   `path` and sets `is_agent = 1`. It is **irreversible** by design.
 - **Path resolution** — `namex()` in `kernel/fs.c` maps an agent's `/` to its
   `jail_root` and refuses `..` traversal above the jail root.
-- **Dangerous-syscall block** — `kernel/syscall.c` returns −1 for `exec`,
-  `kill`, and `mknod` when the caller `is_agent`.
+- **Dangerous-syscall gate (confirm-escape v2)** — `kernel/syscall.c` no longer
+  hard-returns −1 for `exec`/`kill`/`mknod` when the caller `is_agent`. Instead
+  it calls `confirm_request()` in `kernel/confirm.c`, which puts the caller to
+  sleep on `&confirm_wait_chan`, emits `CONFIRM_REQ|<syscall>|<pid>` to the
+  console, and waits for one of: (a) the host operator typing `y`/`n` (which
+  arrives as `CONFIRM_RES` and is handled inline by `try_inline_confirm_res()`
+  in `agentcmd.c` — bypassing the queue so wakeup works even when *every* user
+  process is `SLEEPING`); or (b) `confirm_tick()`, invoked from `clockintr`
+  every timer interrupt, expiring the request after `CONFIRM_TIMEOUT_TICKS`
+  (≈15 s) — **timeout = default deny**. Direct-syscall regression coverage
+  lives in `user/confirm_kill.c` and `user/confirm_mknod.c`.
 - **Configurable deny-list** — no longer hardcoded. A spinlock-guarded kernel
   RAM list (default `{KILL, EXEC}`) gates wire commands; `set_deny`/`get_deny`
   syscalls plus the `denyctl` shell tool manage it (list/add/rm/reset/save/load),
@@ -207,6 +221,11 @@ processes.
   directly: four children issue `WRITE` to the same file at nearly the same
   tick, but `ilock()` serializes them, so their completion ticks step up
   like a staircase.
+- **Sleep / wakeup on a dedicated channel** — confirm-escape v2 sleeps the
+  requester on `&confirm_wait_chan`; the host's `CONFIRM_RES` wakes it inline
+  (no queue drain required), and `clockintr` independently broadcasts a wake
+  on timeout. This pattern lets a kernel call block on a *host operator
+  decision* without blocking the rest of the kernel.
 - **Log transactions (`begin_op`/`end_op`)** wrap the cache's `/cache.bin` disk
   overlay — which is precisely *why* command dispatch had to be split into two
   stages (see §6.1): a transaction can sleep, and sleeping is illegal in the
@@ -270,7 +289,14 @@ user request
 - Tools are encoded to a **minimal text format**: `REQ|LS|`,
   `REQ|READ|<file>`, `REQ|WRITE|<file>:<text>`, `REQ|PRINT|<msg>`,
   `REQ|NICE|<pid>:<prio>`, `REQ|LIST|`, `REQ|SETPRIO|<FN>:<prio>`,
-  `REQ|PS|`, `REQ|HELP|`, with an optional `agent:<role>|` prefix.
+  `REQ|PS|`, `REQ|HELP|`, **`REQ|SPAWN|<bin>|<argv-joined>`**, with an optional
+  `agent:<role>|` prefix. Multi-line payloads escape `\n` → `\\n` on the
+  agent.py side (`_wire_escape`) and `unescape_inplace()` restores them in
+  `agentd`.
+- **Wire-echo race fix:** `kernel/console.c` skips echoing the *payload* of
+  `REQ|` lines (only the `REQ|` prefix and the trailing `\n` echo). Without
+  this, byte-level echo of the wire raced with `consolewrite` output and
+  corrupted the socket stream with garbled lines like `NT|__OBS6__`.
 - **Marker-based capture:** right after the real command, the bridge sends
   `REQ|PRINT|__OBS<n>__`. Because `agentd` drains the queue in order, every line
   printed *before* the marker's echo is exactly that tool's output — so the
@@ -299,12 +325,28 @@ the host returns `LLM_RESP` the kernel does `cache_set` before forwarding. The
 `dispatch` syscall lets user programs (`eval`, `agent_multi`, `write_race`) drive
 the same path.
 
-### 5.5 Where the LLM's authority stops
+### 5.5 The `spawn` tool verb — natural language to a real process
+
+A natural-language request like *"make a process that prints hello"* now
+reaches a real `exec`. `agent.py`'s `wire_for()` translates the LLM's
+`{"tool":"spawn","args":{"bin":"/echo","argv":["echo","hello"]}}` into
+`SPAWN|/echo|echo hello`. In the kernel this is routed to `agentd`'s
+`do_spawn()`, which `fork()`s a child; the child calls `exec()`, which —
+because the child inherits `is_agent` from the jailed worker — triggers the
+confirm-escape gate. The host operator answers `y` (the child execs and runs)
+or `n` (the child reports `SPAWN: exec /<bin> failed` and exits). To make the
+common case work, `populate_jail()` hard-links a small set of binaries
+(`echo`, `sh`, `cat`, `ls`, `wc`, `grep`, `mkdir`, `rm`, `ln`, `kill`) into
+`/agentbox/` *before* `agentd` calls `jail()`.
+
+### 5.6 Where the LLM's authority stops
 
 The LLM never executes anything directly. Its JSON becomes a `REQ|` line; the
 kernel deny-list can reject it before it is queued; if queued, only the jailed
-`agentd` (chroot + blocked `exec`/`kill`/`mknod`) runs it. The LLM's "actions"
-are therefore bounded by independent kernel mechanisms.
+`agentd` runs it. Dangerous syscalls (`exec`/`kill`/`mknod`) go through
+**confirm-escape v2** — the host operator must answer `y` within 15 s or the
+call is denied. The LLM's "actions" are therefore bounded by independent
+kernel mechanisms *and* a human-in-the-loop gate.
 
 *(KR: LLM은 무엇도 직접 실행하지 않는다 — JSON → REQ| 라인 → (거부목록) →
 (jail+위험 syscall 차단) agentd. 다중 경계.)*
@@ -343,6 +385,7 @@ it via `SETPRIO <FN>:<prio>`.
 | PS      | 1       | 8        | **AI self-observation** — proc snapshot (pid/state/prio/name) |
 | HELP    | 1       | 0        | **AI self-observation** — usage catalogue |
 | CHAT    | 1       | —        | prints a cache-sourced answer |
+| SPAWN   | 1       | 5        | fork+exec inside the jail; `exec` triggers confirm-escape (host y/N) |
 
 **AI self-observation.** `PS` uses a new `procinfo(buf,max)` syscall
 (`kernel/procinfo.h`) to return a process-table snapshot, so the LLM can discover
@@ -354,10 +397,17 @@ how to call a tool at runtime. Data comes from the kernel, formatting happens in
 
 1. **Configurable deny-list at the kernel** — default `KILL`/`EXEC` blocked
    before reaching `agentd`; humans can extend it, agents cannot.
-2. **Agent syscall layer** — an `is_agent` process is refused
-   `exec`/`kill`/`mknod` regardless.
+2. **Agent syscall layer (confirm-escape v2)** — when an `is_agent` process
+   calls `exec`/`kill`/`mknod`, the kernel sleeps it on `&confirm_wait_chan`
+   and asks the host operator for a one-time `y/N`. Timeout (15 s) = default
+   deny.
 3. **chroot jail** — files outside `/agentbox` are not even *visible*; `..`
    escape is refused in `namex()`.
+
+The boundary is now both **mechanical** (deny-list / jail) and
+**human-in-the-loop** (confirm-escape) — privileged actions require an
+operator's explicit consent even if the LLM finds a path through every other
+layer.
 
 ### 6.4 Evaluation harness
 
@@ -370,11 +420,28 @@ how to call a tool at runtime. Data comes from the kernel, formatting happens in
   `eval cache <N>` (round-1 miss vs round-2 hit rate), `eval acl <N>` (per-role
   ACL deny rate against a live child), `eval fair <I>` (prio 0 vs 20 completion
   time), `eval semantic <N>` (exact / paraphrase / unrelated matching).
-- **`agentdemo`** checks jail read, `..`/outside-path denial, escalation denial,
-  and `exec` blocking. **`cache_test`** validates RAM-hit / evict / disk-promote
-  (13/13). **`write_race`** shows inode-sleeplock serialization.
-- **`tools/regression.py`** builds, boots, and runs a multi-case regression
-  suite (it caught 3 latent bugs before the Week-13 dry-run).
+- **`agentdemo`** (now fork+exec pattern so confirm-escape *allow* doesn't
+  replace the demo process) checks jail read, `..`/outside-path denial,
+  escalation denial, and **`exec` confirm-escape allow/deny** (5 checks).
+  **`cache_test`** validates RAM-hit / evict / disk-promote (13/13).
+  **`write_race`** shows inode-sleeplock serialization. **`confirm_kill`** and
+  **`confirm_mknod`** exercise the `SYS_kill` / `SYS_mknod` gates directly.
+- **`tools/ralph_battery.py`** drives 26 shell/syscall scenarios over raw TCP
+  to an isolated `qemu` on port 5555 (~3 min). Scenarios: boot, basic shell,
+  `agentdemo`, `cache_test`, `cfs_share`, `write_race`, `priority_test`,
+  `eval cache/fair/acl`, multi-pending boundary, confirm allow/deny,
+  `confirm_kill`, `confirm_mknod`, still-alive, no-fatal markers.
+- **`tools/ralph_natlang.py`** spawns `agent.py` against an isolated `qemu` on
+  port 6666 with `UPSTAGE_API_KEY=""` (forcing mock mode for determinism),
+  pipes natural-language prompts into its stdin, and verifies REPL behavior
+  over 39 scenarios (~50 s). Coverage: bridge connect, ReAct, `:ask` MISS→HIT,
+  spawn allow/deny, multi-line write/read, greeting cache HIT (Issue A
+  regression — `_cache_lookup` normalization), Korean-particle variants, ACL
+  nice denial, kill confirm-escape, Korean-argv byte preservation, EOF.
+
+Cumulative automated regression: **65/65 GREEN**. Each harness uses its own
+`fs.img` copy, so both can run alongside a developer's interactive 4444
+session without interference.
 
 ---
 
@@ -401,22 +468,44 @@ This is recorded explicitly because it departs from the proposal's wording. A
 kernel-side mini-parser (`kernel/json.c`) is noted as optional future work with
 low priority (security/maintenance cost outweighs learning value).
 
-### 7.2 Confirm-escape is prototyped but disabled
+### 7.2 Confirm-escape v2 — active (2026-05-28)
 
-`kernel/confirm.c` implements a "confirm-escape": instead of hard-denying an
-agent's `exec`/`kill`/`mknod`, it prints `CONFIRM_REQ|...` to the console so the
-host (`agent.py`) can prompt the user for a one-time `y/N` allow (5 s timeout).
-It is **currently disabled** (`syscall.c` keeps the unconditional block) because
-of a suspected `kerneltrap` panic in that path. Re-enabling it after root-causing
-the panic, and extending it from single-pending to a queue, is future work.
+The v1 prototype was disabled mid-project after a `kerneltrap` panic traced
+to a yield-poll wakeup race. **v2 was redesigned and is active** as of
+2026-05-28 (commit `574c3d7`):
 
-### 7.3 Out of scope
+- The requester now sleeps on a **dedicated channel** (`&confirm_wait_chan`)
+  in `kernel/confirm.c`, not via yield-polling.
+- Timeout is delivered by **`clockintr` → `confirm_tick()`** every tick
+  (`CONFIRM_TIMEOUT_TICKS = 150`, ≈15 s) — independent of any other process
+  being scheduled.
+- The host's `CONFIRM_RES` response is dispatched **inline** by
+  `try_inline_confirm_res()` in `agentcmd.c`, bypassing the queue so it
+  wakes the channel even when every user process (including `agentd`) is
+  blocked on its own command — the situation that broke v1.
+
+Regression coverage: `ralph_battery` runs the allow / deny / timeout paths
+plus the `SYS_kill` and `SYS_mknod` gate exercisers. The remaining future
+work is multi-request batching: today only one request is pending at a time.
+
+### 7.3 Solar tokenizer boundary
+
+`agent.py`'s wire path is byte-perfect (verified by `ralph_natlang.py` N17 —
+Korean `argv` survives intact end-to-end), but a small set of LLM prompts
+where a Korean particle abuts a number (e.g. `"22 + 45는?"`) can lose a
+token on the Solar side. Mitigation lives in `SYSTEM_PROMPT` as a standalone
+*token-boundary* clause that explicitly tells the model to preserve every
+byte (Hangul / CJK / digits in mid-sentence). The user workaround is to add
+whitespace or drop the surrounding quotes; the code workaround is byte-perfect
+echo on every other layer.
+
+### 7.4 Out of scope
 
 - **F10 — idle-time LoRA training:** infeasible in xv6 (RISC-V, no float, tiny
   memory/disk). At most a conceptual stub ("detect idle ticks → signal the host
   to train"). Out of scope.
 
-### 7.4 Measurement caveats
+### 7.5 Measurement caveats
 
 - `cfs_share` / `eval fair` percentages are environment-dependent (host load,
   QEMU timing); use them as relative evidence of the weight effect, not absolute
