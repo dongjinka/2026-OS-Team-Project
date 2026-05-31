@@ -18,6 +18,88 @@
 
 ---
 
+## [2026-05-28] — 자연어 에이전트 안정화 · confirm-escape v2 · spawn 도구 · 회귀 65/65 (커밋 `574c3d7`)
+
+> exec/kill/mknod 같은 위험 syscall을 단순 거부에서 *호스트 사용자에게 y/N
+> 확인을 받고* 통과시키는 **confirm-escape v2** 와, 자연어 `프로세스
+> 만들어줘` → 도구 verb `spawn` → fork+exec → confirm-escape 게이트의 풀
+> 파이프라인. 회귀를 **65/65 자동** (셸/syscall 26 + 자연어 39)으로 끌어
+> 올림.
+
+### Added
+- (Se-Joong) **confirm-escape v2** — `kernel/confirm.c` 신규. yield-poll 방식
+  v1을 대체하는 dedicated channel sleep/wakeup. `confirm_request()`가
+  요청자를 `&confirm_wait_chan`에 잠재우고, `clockintr`가 매 tick
+  `confirm_tick()` (`kernel/trap.c`)을 호출해 만료를 깨움. `CONFIRM_TIMEOUT_TICKS = 150`
+  (≈15s) — 사용자가 stdin 정리 후 응답할 충분한 시간 확보.
+- (Se-Joong) **CONFIRM_RES 인라인 처리** — `kernel/agentcmd.c`에
+  `try_inline_confirm_res()` 추가. 모든 user proc이 SLEEPING 일 때 (드물지
+  않은 경우 — agent.py가 host 응답 대기 중) 큐 드레인 없이 spinlock+wakeup
+  만으로 바로 처리해 wakeup race 차단.
+- (Se-Joong) **`SYS_kill` / `SYS_mknod` confirm-escape 게이트 확장** —
+  `kernel/syscall.c`의 `agent_blocked` 분기가 단순 -1 반환 대신
+  `confirm_request()` 호출. 직접 호출 회귀용 user 프로그램
+  `user/confirm_kill.c`, `user/confirm_mknod.c` 신규.
+- (Se-Joong) **spawn 도구 verb** — 자연어 "프로세스 만들어줘"를 받는 끝단:
+  `agent.py SYSTEM_PROMPT/TRANSLATE_PROMPT/wire_for()`에 `spawn` 추가, wire는
+  `SPAWN|<bin>|<argv-joined>`. `user/agentd.c`에 `do_spawn()` 신규 — fork
+  → exec → wait. exec 자체가 `is_agent` 의 위험 syscall이므로 자식이
+  confirm-escape 게이트에 걸려 호스트에 y/N 프롬프트가 자연스럽게 발생.
+- (Se-Joong) **`populate_jail()`** — `user/agentd.c`. `jail("/agentbox")`
+  진입 전에 호스트 fs의 `echo`/`sh`/`cat`/`ls`/`wc`/`grep`/`mkdir`/`rm`/`ln`/`kill`
+  바이너리를 `/agentbox/`로 hard-link. 종전 빈 jail 에서 `echo failed`가
+  나던 자연어 시나리오를 정상 실행 가능하게 변경.
+- (Se-Joong) **자동 회귀 하니스 2종** — `tools/ralph_battery.py` (26 셸/syscall
+  시나리오, 격리 포트 5555, ~3 min)와 `tools/ralph_natlang.py` (39 자연어
+  시나리오, mock 모드 + 격리 포트 6666, ~50 s). 각각 자체 fs.img 복사본을
+  써 사용자의 4444 세션과 동시 실행 가능. 누적 **65/65 GREEN**.
+- (Se-Joong) **agent.py mock 모드** 확장 — `UPSTAGE_API_KEY=""` 시
+  결정적 rule-based stub. N11(인사 캐시 HIT) / N14(write→read 다단계 chain) /
+  N15(nice ACL) / N16(kill confirm deny) / N17(한글 argv 보존) 분기와
+  `_mock_step_after_write` 다단계 flag 추가.
+
+### Changed
+- (Se-Joong) `kernel/console.c` **REQ\| payload echo skip** — `consoleintr`가
+  REQ\| 라인의 prefix 4 byte + `\n`만 echo하고 payload 본문은 echo 생략.
+  agent.py가 보낸 wire의 byte-단위 echo가 `consolewrite` 출력과 byte-race로
+  interleave해 socket으로 `NT|__OBS6__` 같은 garbled line이 새던 문제 차단.
+  line boundary는 보존돼 reader의 `split('\n')`는 그대로 동작.
+- (Se-Joong) **wire newline escape** — `agent.py:_wire_escape()`가
+  chat/write/print 페이로드의 `\n`을 `\\n`으로 치환, `user/agentd.c
+  unescape_inplace()`가 복원. 다중 라인 `/plan.txt TODO 1\nTODO 2`가 wire
+  newline에서 잘리던 문제 해결.
+- (Se-Joong) `user/agentdemo.c` **fork+exec 패턴** — confirm-escape allow
+  분기가 데모 프로세스를 echo로 *replace* 해버려 `=== demo done ===`가 안
+  찍히던 회귀 깨짐을 해결. 자식에서 exec, 부모는 wait → allow/deny 양쪽
+  모두 데모 완료 도달.
+- (Se-Joong) `agent.py:_handle_confirm_req` — 프롬프트 "5초 안"을 "15초 안"
+  으로 정정, `input()` 직전 `termios.tcflush(TCIFLUSH)` 호출로 stale stdin
+  enter 키 잔재 제거 (이전엔 자동 enter로 묵묵부답 deny).
+- (Se-Joong) `agent.py:_read_line` **cooked 모드 기본** — raw 모드 (UTF-8
+  incremental decoder + `_wipe_input`/`_draw_input`)는 한글 보일 때 4-5 회
+  키 입력이 필요한 UX 버그가 있어 default를 cooked로 전환. raw는
+  `AGENT_RAW_INPUT=1` opt-in. raw 사용시 `_wipe_input`에 `rows_above + 1`
+  safety margin 추가 — 한글 wide-cell wrap 경계에서 backspace 후 첫 단어가
+  잔재로 남던 버그 fix.
+- (Se-Joong) `agent.py:SYSTEM_PROMPT` **★ token-boundary rule** clause 분리 —
+  spawn 블록 안에 묻혀 있어 chat/write/print에 신호가 안 가던 한글/CJK byte
+  보존 규칙을 standalone clause로 빼냄. `"22 + 45는?"`처럼 숫자가 조사
+  앞에 붙는 prompt에서 Solar tokenizer가 `45` 를 drop하던 회귀 mitigation.
+
+### Fixed
+- (Se-Joong) **`_cache_lookup` strip mismatch** (Issue A) — `agent.py`
+  line 800 `_cache_lookup`이 lookup key를 strip 안 함, `_cache_store`는
+  strip 함 → FNV-1a hash 불일치로 동일 prompt 가 항상 MISS. 한 줄 `.strip()`
+  추가로 두 번째 호출부터 `[cache HIT]` 정상 출력. 자연어 회귀 N11(인사)·
+  N13(`:ask 22+45는?`)이 이를 직접 검증.
+
+### Security
+- (Se-Joong) confirm-escape 도입으로 *명시적 사용자 동의 없이는* 위험 syscall
+  (exec/kill/mknod)이 절대 통과 못 함. 타임아웃 만료시 default deny —
+  사용자가 자리를 비워도 차단이 fallback 정책.
+
+---
+
 ## [2026-05-22] — AI 자기관찰 명령어 · 설정 가능한 거부 목록 · 보안 강화 · LLM 캐시
 
 ### Added
