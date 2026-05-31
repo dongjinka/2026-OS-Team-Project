@@ -56,9 +56,9 @@ and implement** be a substantive part of the project — see
 | F4 | CFS details — fork inheritance, I/O wakeup bonus, global `cfs_min_vruntime` | ✅ |
 | F5 | QEMU ↔ Upstage Solar Python bridge (`.env` auto-load) | ✅ |
 | F6 | LLM JSON deserialization (host-side parsing — see report for rationale) | ✅ |
-| F7 | Sandboxing — chroot jail + `exec`/`kill`/`mknod` block + tool whitelist + configurable deny-list | ✅ |
+| F7 | Sandboxing — chroot jail + `exec`/`kill`/`mknod` **confirm-escape (host y/N)** + tool whitelist + configurable deny-list | ✅ (v2 sleep/wakeup + inline `CONFIRM_RES`) |
 | F8 | Per-tool priority customization (`SETPRIO` / `LIST`) | ✅ |
-| — | ReAct autonomous agent loop + conversation memory | ✅ (bonus) |
+| — | ReAct autonomous agent loop + conversation memory + **`spawn` tool verb** (natural language → process creation → confirm-escape gate) | ✅ (bonus) |
 | F9 | LLM response cache — `cache.c` (RAM + `/cache.bin` disk overlay + MinHash/Jaccard) + kernel `ASK` orchestration + `agent.py :ask` path (hit ⇒ skip Solar) | ✅ |
 | F10 | Idle-time LoRA training | ❌ out of scope (Future Work) |
 
@@ -73,7 +73,7 @@ and implement** be a substantive part of the project — see
 | Cross-toolchain  | `riscv64` GCC / binutils                                                |
 | Host bridge      | **Python 3** (`agent.py`), `openai` SDK (Solar is OpenAI-API-compatible) |
 | LLM backend      | **Upstage Solar Pro** (`solar-pro2`), via `https://api.upstage.ai/v1`   |
-| Build / test     | GNU Make; `tools/regression.py` regression harness                      |
+| Build / test     | GNU Make; `tools/ralph_battery.py` (26 shell/syscall scenarios) + `tools/ralph_natlang.py` (39 natural-language scenarios) — **65/65 PASS** |
 
 No floating point and no dynamic allocation are used in any kernel-side
 addition — both are restricted in xv6.
@@ -90,7 +90,9 @@ addition — both are restricted in xv6.
 ├── docs/
 │   ├── Technical_Report.md     ← Deliverable #2: architecture, OS concepts, LLM integration
 │   └── Development_Process.md   ← Deliverable #3: planning → execution → retrospective
-├── tools/regression.py        ← multi-test regression harness (build + boot + checks)
+├── tools/
+│   ├── ralph_battery.py       ← 26 shell/syscall regression scenarios (isolated port 5555, ~3 min)
+│   └── ralph_natlang.py       ← 39 natural-language scenarios (mock mode, port 6666, ~50 s)
 ├── Implementation.md          ← deep, code-referenced architecture notes (KR)
 ├── plan.md                    ← feature breakdown & status tracking (KR)
 ├── CHANGELOG.md               ← chronological change log (KR)
@@ -101,15 +103,19 @@ addition — both are restricted in xv6.
     │   ├── trap.c console.c   ← per-tick vruntime accrual; agent_drain() hook
     │   ├── agentcmd.c deny.h  ← 2-stage dispatch, configurable deny-list, ASK/cache meta-cmds
     │   ├── cache.c            ← F9 LLM response cache (RAM + /cache.bin + MinHash/Jaccard)
-    │   ├── confirm.c          ← confirm-escape prototype (currently disabled — see Limitations)
+    │   ├── confirm.c          ← confirm-escape v2 (sleep/wakeup on dedicated channel; clockintr-driven timeout)
     │   ├── fs.c sysfile.c     ← chroot jail (namex), jail() syscall
-    │   ├── syscall.c          ← blocks exec/kill/mknod for agent processes
+    │   ├── syscall.c          ← exec/kill/mknod for agents go through confirm-escape (host y/N) instead of hard -1
     │   ├── sysproc.c          ← setpriority guard; agent_recv/set_deny/get_deny/cache/dispatch syscalls
+    │   ├── console.c          ← REQ| line payload echo skip (prevents wire byte-race with consolewrite)
+    │   ├── agentcmd.c         ← 2-stage dispatch + inline try_inline_confirm_res() bypassing the queue
     │   └── procinfo.h         ← process-snapshot struct (PS self-observation)
     └── user/
-        ├── agentd.c           ← jailed agent worker (tool table + per-fn priority + PS/HELP/CHAT)
+        ├── agentd.c           ← jailed agent worker — tool table + per-fn priority + PS/HELP/CHAT + populate_jail + do_spawn
         ├── denyctl.c          ← shell tool to manage the deny-list (list/add/rm/reset/save/load)
-        ├── agentdemo.c        ← F2/F7 sandbox demo
+        ├── agentdemo.c        ← F2/F7 sandbox demo (fork+exec pattern — confirm-escape allow/deny both reach demo done)
+        ├── confirm_kill.c     ← direct SYS_kill confirm-escape gate exerciser
+        ├── confirm_mknod.c    ← direct SYS_mknod confirm-escape gate exerciser
         ├── cfs_share.c        ← quantitative CFS fairness benchmark
         ├── priority_test.c    ← priority + scheduler test (auto-verified finish order)
         ├── cache_test.c       ← F9 cache unit test (13/13)
@@ -211,8 +217,10 @@ tools, observes their output, and remembers the conversation:
 you ▸ make a file plan.txt with three TODO items, then read it back
 you ▸ what files have I created so far?
 you ▸ summarise everything written to files
-you ▸ :ask what is a vruntime?       ← routes through the kernel F9 cache (hit ⇒ skips Solar)
-you ▸ :role reader                   ← tag subsequent requests with a role
+you ▸ :ask what is a vruntime?               ← routes through the kernel F9 cache (hit ⇒ skips Solar)
+you ▸ :ask 22 + 45 in Korean?                ← repeat to see [cache HIT]
+you ▸ make a process that prints "hello"     ← spawn → confirm-escape → host y/N
+you ▸ :role reader                           ← tag subsequent requests with a role
 ```
 
 > On boot, `init` automatically launches `agentd` (which jails itself into
@@ -230,7 +238,7 @@ you ▸ :role reader                   ← tag subsequent requests with a role
 | **Scheduling (CFS)**    | `kernel/proc.c` (weights, vruntime, leftmost pick), `kernel/trap.c` (per-tick accrual) |
 | **Processes & priority**| `setpriority`/`getpriority`; user vs. kernel class; two-way escalation guard |
 | **System calls**        | New `jail`, `agent_recv`, `set_deny`/`get_deny`, `procinfo`, `set_cache`/`get_cache`, `dispatch` |
-| **Protection / sandbox**| chroot jail in `namex()`; `exec`/`kill`/`mknod` blocked for agents; configurable deny-list (humans-only) |
+| **Protection / sandbox**| chroot jail in `namex()`; `exec`/`kill`/`mknod` from agents go through **confirm-escape v2** (sleep on `&confirm_wait_chan`, woken by `clockintr` or host `CONFIRM_RES`); configurable deny-list (humans-only) |
 | **Synchronization**     | inode sleeplock (`write_race`), cache + deny-list spinlocks, log transactions (`begin_op`) for the cache disk overlay |
 | **Concurrency / IPC**   | `agentcmd.c` 2-stage queue (ISR enqueue → process-context drain); `agent_multi` runs 4 concurrent agents |
 | **File system**         | jailed file tools in `/agentbox`; `/cache.bin` cache overlay; `/denylist.conf` persistence |
@@ -306,16 +314,25 @@ then `asciinema rec demo.cast` → run the demo → `agg demo.cast docs/media/ag
 | ------------------------------------- | ------ |
 | Kernel boot (CPUS=1 and CPUS=3)       | ✅ no panic |
 | `priority_test` Test 1 / 2 / 3        | ✅ PASSED (Test 3 auto-checks finish order HIGH→MED→LOW via pipe) |
-| `agentdemo` (sandbox/privilege checks)| ✅ all pass |
+| `agentdemo` 5 checks (jail read/write, `..` blocked, negative-priority denied, exec confirm-escape allow/deny) | ✅ all pass |
 | `cache_test`                          | ✅ 13/13 (RAM hit / evict / disk promote) |
 | `denyctl add WRITE` → `REQ\|WRITE\|`  | ✅ blocked in kernel (never reaches `agentd`) |
 | `denyctl save` → reboot → `list`      | ✅ `/denylist.conf` auto-loaded, entries survive |
 | Jail escape via `..` / outside paths  | ✅ DENIED |
-| Agent `exec` / `kill` / `mknod`       | ✅ return −1 |
+| Agent `exec` / `kill` / `mknod`       | ✅ host y/N gate (timeout = default deny) |
+| `confirm_kill` / `confirm_mknod`      | ✅ direct syscall gate verified |
 | User → negative-priority escalation / kernel-class demotion | ✅ DENIED |
 | `REQ\|KILL\|…` deny-list              | ✅ blocked before reaching `agentd` |
+| `REQ\|SPAWN\|/echo\|...`              | ✅ fork+exec inside jail, confirm-escape on exec |
 | F9 `:ask` repeated                    | ✅ MISS then HIT (Solar skipped on hit) |
+| `_cache_lookup` strip normalize       | ✅ same prompt hits on 2nd call (Issue A regression) |
+| **`tools/ralph_battery.py`** (26 shell/syscall scenarios) | ✅ 26/26 PASS |
+| **`tools/ralph_natlang.py`** (39 natural-language scenarios, mock mode) | ✅ 39/39 PASS |
 | Live Solar ReAct multi-step + memory  | ✅ ls→read×N→summary; follow-up uses prior context |
+
+Cumulative regression: **65/65 GREEN**. Both harnesses use isolated ports
+(5555 / 6666) and per-run `fs.img` copies, so they can run alongside a
+developer's interactive 4444 agent session.
 
 ---
 
@@ -327,10 +344,17 @@ then `asciinema rec demo.cast` → run the demo → `agg demo.cast docs/media/ag
   kernel. The kernel only accepts a validated minimal `REQ|<CMD>|<arg>` format.
   Rationale (kernel safety, no float/heap in xv6, layer separation) is in the
   report — a deliberate departure from the original proposal wording.
-- **Confirm-escape** (`kernel/confirm.c`): a prototype that turns the hard
-  `exec`/`kill`/`mknod` block into a one-time host-confirmed allow. It is
-  **currently disabled** (a suspected `kerneltrap` panic); the stable behavior is
-  unconditional blocking.
+- **Confirm-escape v2** (`kernel/confirm.c`) is **enabled** as of the
+  2026-05-28 milestone: dangerous agent syscalls (`exec`/`kill`/`mknod`) sleep
+  on a dedicated channel until the host operator answers `y` or `n`, with a
+  15 s timeout (default deny). v1's yield-poll wakeup race was replaced by an
+  inline `try_inline_confirm_res()` in `agentcmd.c` that wakes the channel
+  without going through the dispatch queue.
+- **Solar tokenizer boundary** — a small set of prompts where a Korean
+  particle abuts a number (e.g. `"22 + 45는?"`) can drop a token in the LLM
+  response. `agent.py`'s wire path is byte-perfect; the mitigation is a
+  standalone *token-boundary* clause in `SYSTEM_PROMPT` and a user workaround
+  (insert a space, drop the quotes).
 - **F10 (idle-time LoRA training)** is out of scope for the xv6 environment.
 - `cfs_share` shares are environment-dependent; use `CPUS=1` for stable numbers.
 
