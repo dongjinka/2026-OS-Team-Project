@@ -26,12 +26,18 @@ Scenarios:
 Fail markers (in transcript): "panic:", "kerneltrap", "scause=", "FAIL ".
 """
 import os, sys, socket, time, threading, subprocess, signal, re, shutil
+from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 5555
-FS_SRC  = "/root/OS_Project/xv6-riscv/fs.img"
+# Derive from this script's location (tools/..) so the harness runs from any
+# checkout — not just the original author's /root/OS_Project. Same pattern as
+# tools/regression.py.
+ROOT    = Path(__file__).resolve().parent.parent
+XV6_DIR = ROOT / "xv6-riscv"
+FS_SRC  = str(XV6_DIR / "fs.img")
 FS_COPY = "/tmp/fs_ralph.img"
-KERNEL  = "/root/OS_Project/xv6-riscv/kernel/kernel"
+KERNEL  = str(XV6_DIR / "kernel" / "kernel")
 LOG     = "/tmp/ralph_qemu.log"
 
 def info(msg): print(f"[T] {msg}", flush=True)
