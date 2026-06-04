@@ -3,6 +3,7 @@
 **Project:** LLM-OS (Direction A — *OS for LLM*) · 2026 Operating Systems Team Project
 **Window:** Week 9 – Week 14 (2026-04-30 → final presentation)
 **Repository:** `github.com/dongjinka/2026-OS-Team-Project`
+**Document last updated:** 2026-06-04 (Week 14)
 
 > *(KR: 본 문서는 기획 → 일정 → 실행 → 회고 순서로 개발 과정을 기록한다. 본문은
 > 영어, 핵심 사항에는 한국어 주석을 붙였다. 주차별 진행·이슈·해결은 모두 실제
@@ -19,10 +20,10 @@
 
 | Member | Branch | Primary focus *(derived from git history)* |
 | ------ | ------ | ------------------------------------------ |
-| **Se-Joong Kim** (김세중) | `Sejoong` | Integration & lead: host↔xv6 socket, Solar API + REPL, CFS+dispatcher integration, jail-based sandbox rewrite, semantic cache (F9), regression harness |
-| **SeungBeom Kim** (김승범) | `SeungBeom` | Core LLM-OS features: CFS/priority/sandbox/agent loop, configurable deny-list, security guards, self-observation commands (PS/HELP), F9 cache wiring |
-| **June Kong** (성준) | `june_os` | Evaluation automation (Test 3 auto-verify, `cfs_share`), documentation (Implementation.md, CHANGELOG, README), F6 design decision |
-| **Dongjin Ka** | (repo owner) | Repository setup & administration, branch/PR hosting |
+| **Se-Joong Kim** (김세중) | `Sejoong` | Integration & lead: host↔xv6 socket, Solar API + REPL, CFS+dispatcher integration, jail-based sandbox rewrite, semantic cache (F9), **confirm-escape v1 → v2**, **`spawn` verb + `populate_jail`**, **`ralph_battery` + `ralph_natlang` regression pair (65/65 GREEN)** |
+| **SeungBeom Kim** (김승범, `server3342`) | `SeungBeom` | Core LLM-OS features: CFS/priority/sandbox/agent loop, configurable deny-list, security guards, self-observation commands (PS/HELP), F9 cache wiring |
+| **June Kong** (성준, `SJ-Kong`) | `june_os` | Evaluation automation (Test 3 auto-verify, `cfs_share`), documentation (Implementation.md, CHANGELOG, English deliverables — README.en/Technical Report/Development Process), F6 design decision |
+| **Dongjin Ka** | `Dongjin` *(repo owner)* | Repository setup & PR hosting; **2026-06-04 — adversarial security audit (7 dimensions, 16 confirmed findings) + red-team harness `tools/sec_audit.py` + reproduction binary `user/secnice.c`** — additive only under the `main` 불변 rule |
 
 > *(KR: 역할은 git 이력에서 추론. 실제와 다르면 이 표를 직접 수정할 것.)*
 
@@ -76,15 +77,16 @@ in-kernel IPC queue, and the file system — see
 
 | Week | Dates (approx.) | Course milestone | What actually happened |
 | ---- | --------------- | ---------------- | ---------------------- |
-| **9**  | ~04-28 | Team formation, direction, 1-paragraph proposal | Repo created (`Initial commit`, 04-30, Dongjin); direction A + AIOS idea agreed |
-| **10** | ~05-05 | Problem statement + system sketch | Weekly-progress docs; **host↔xv6 socket** prototype (05-06); Solar API + REPL (05-11) |
-| **11** | ~05-12 | Minimal working prototype | **CFS scheduler + command dispatcher** integrated into xv6 (05-11); course-requirements doc added |
-| **12** | ~05-19 | Integrated prototype + ≥1 eval metric | **Core LLM-OS features** (CFS/priority/sandbox/agent loop, 05-18); **jail-based sandbox** rewrite (05-21); **F9 cache** + security guards (05-22); **eval automation** Test 3 + `cfs_share`, CHANGELOG, Implementation.md rewrite (05-20) |
-| **13** | ~05-26 | Evaluation results + dry-run | **9-test regression harness** + 3 latent-bug fixes (05-26); host-confirm escape for exec/kill; agent.py REPL/Unicode fixes |
-| **14** | ~06-02 | **Final presentation** (English) | Final deliverables: README, Technical Report, Development Process, English slides |
+| **9**  | ~04-28 → 04-30 | Team formation, direction, 1-paragraph proposal | Repo created (`Initial commit`, 04-30, Dongjin); direction A + AIOS idea agreed |
+| **10** | ~05-05 → 05-11 | Problem statement + system sketch | Weekly-progress docs (`e94c6d5`, 05-05); **host↔xv6 socket** prototype (`406ee19`, 05-06); Solar API + REPL (`baf2566`, 05-11) |
+| **11** | ~05-11 → 05-13 | Minimal working prototype | **CFS scheduler + command dispatcher** integrated into xv6 (`6f406d4`, 05-11); course-requirements doc added (`eab475d`, 05-11); PR #2 merged 05-13 |
+| **12** | ~05-18 → 05-22 | Integrated prototype + ≥1 eval metric | **Core LLM-OS features** (`30c81dc`, 05-18 — CFS/priority/sandbox/agent loop); **eval automation** Test 3 + `cfs_share` + CHANGELOG + Implementation.md rewrite + `.gitignore` mkfs fix (`f3807d4`/`66a45e1`/`2e0664b`/`1a252d4`, 05-20); **jail-based sandbox** rewrite (`26d9269`, 05-21); **F9 cache** port + command-path wiring (`76b2737`/`7d4dd19`/`5fd0d44`, 05-22); **security guards** NICE + `sys_procinfo` (`a59ee1f`, 05-22); **AI self-observation** PS/HELP (`ad6cd20`, 05-22); configurable deny-list (`13030e0`, 05-22); semantic cache → word-level Jaccard (`c436131`, 05-22) |
+| **13a** | ~05-26 | First hardening round | **9-test regression harness** + 3 latent-bug fixes (`05bbe38`, 05-26); REPL backspace fix (`7a539b0`); **confirm-escape v1** (`ac013d6`); agent.py `run_tool` timeout 12 s → 24 s + marker retry (`c77e0a6`); jail confirm-escape branch **temporarily disabled** to dodge a `kerneltrap` panic (`40bf608`); PR #10 merged 05-26 |
+| **13b** | ~05-28 → 05-31 | Natural-language stabilisation + doc sync | **Confirm-escape v2** (sleep/wakeup on dedicated channel, `clockintr` timeout, inline `try_inline_confirm_res` bypass of the queue); **`spawn` tool verb** + `populate_jail()` hard-link of core binaries; `console.c` `REQ\|` payload echo skip (wire byte-race fix); `_cache_lookup` strip-normalize (Issue A — same prompt now hits on 2nd call); **two new regression harnesses** — `tools/ralph_battery.py` (26 shell/syscall scenarios, port 5555) + `tools/ralph_natlang.py` (39 NL scenarios, port 6666); **cumulative 65 / 65 GREEN** (`574c3d7`, 05-28; PR #11 merged 05-28). Doc consistency pass `b51938a` (05-31) updated CHANGELOG·Implementation·README.en·Weekly to match. **English deliverables (README.en + Technical Report + Development Process) committed** (`8ee2db7`, 05-28; PR #12 merged 05-31) |
+| **14** | 2026-06-04 → final presentation | **Final presentation** (English) + audit pass | **Adversarial security audit on `origin/Dongjin`** (`24202ad`/`c9e2875`, 06-04) — 7 dimensions, 16 confirmed findings, 1 reproduced by `tools/sec_audit.py`; **main 불변** principle (audit is additive; fixes ship as separate PRs). Still pending: **English slides (Deliverable #4)**, **demo capture** (asciinema → GIF for `docs/media/`), and triage of audit findings (security PR plan). |
 
-*(KR: 오늘 기준(2026-05-28)은 Week 13. 남은 일: 영어 슬라이드, 데모 캡처,
-브랜치 통합·최종 머지.)*
+*(KR: 오늘 기준(2026-06-04, Week 14). 남은 일: 영어 슬라이드, 데모 캡처,
+보안 감사 발견 #1·#2·#3·#4 별도 PR 정리.)*
 
 ---
 
@@ -117,10 +119,41 @@ in-kernel IPC queue, and the file system — see
   documented the **F6 host-side-parsing decision**; restored `mkfs.c` and fixed
   the `.gitignore` build breakage.
 
-**Week 13 — hardening & dry-run (lead: Se-Joong)**
-- Se-Joong: added a **9-case regression harness**, found and fixed **3 latent
-  bugs**; upgraded the agent confirm/timeout behavior; fixed REPL line-editing
-  and multibyte-output corruption in `agent.py`.
+**Week 13a — first hardening round (lead: Se-Joong, ~05-26)**
+- Se-Joong: added a **9-case regression harness** (`tools/regression.py`),
+  found and fixed **3 latent bugs**; fixed REPL line-editing and multibyte-output
+  corruption in `agent.py`; **first cut of confirm-escape (v1)** — but a
+  `kerneltrap` panic forced the v1 branch to be **temporarily disabled** the
+  same day (`40bf608`), keeping the unconditional block as a fallback.
+
+**Week 13b — natural-language stabilisation (lead: Se-Joong, ~05-28 → 05-31)**
+- Se-Joong: rebuilt the confirm gate as **confirm-escape v2** — `kernel/confirm.c`
+  sleeps the trapping syscall on `&confirm_wait_chan`, `clockintr` enforces a
+  15 s timeout, and `agentcmd.c`'s `try_inline_confirm_res()` wakes the channel
+  inline (bypassing the agent queue). Removed v1's yield-poll race. Added the
+  **`spawn` tool verb** (`do_spawn` + `populate_jail()` hard-link `echo`/`sh`/
+  `cat`/`ls`/... into `/agentbox` so `exec` resolves), patched `console.c` to
+  **skip echoing the payload of `REQ|` lines** (wire byte-race), and fixed the
+  `_cache_lookup` strip-normalize asymmetry (Issue A — repeat `:ask` now hits).
+  Promoted regression to a **harness pair**: `tools/ralph_battery.py`
+  (26 shell/syscall scenarios on port 5555) + `tools/ralph_natlang.py` (39
+  natural-language scenarios in mock mode on port 6666). Cumulative
+  **65 / 65 GREEN**. Followed up with a doc-consistency pass `b51938a`
+  (CHANGELOG / Implementation / README.en / Weekly aligned with `574c3d7`).
+- June: wrote the **English deliverables** — `README.en.md`,
+  `docs/Technical_Report.md`, `docs/Development_Process.md` (`8ee2db7`, 05-28).
+
+**Week 14 — final pass & adversarial audit (06-04 →)**
+- Dongjin: ran a **7-dimension adversarial audit** of the team's custom code
+  (command path · jail · confirm-escape · F9 cache · host bridge). 20 raw
+  candidates → **16 confirmed**; 1 reproduced live by `tools/sec_audit.py`
+  (jailed `NICE` not self-scoped — `RESULT=VULNERABLE`). All work is on
+  **`feature/dongjin-security-suite`** / `origin/Dongjin` and is **additive**
+  (`SECURITY_AUDIT.md`, `tools/sec_audit.py`, `user/secnice.c`); main is held
+  invariant under the "main 불변" rule so the audit is reproducible against
+  `cc40a08`. Actual fixes will ship as separate PRs.
+- Team-wide remaining work: English slides (Deliverable #4), demo capture
+  (asciinema → GIF for `docs/media/`), and triage of the audit findings.
 
 ### 4.2 Evaluation metrics defined
 
@@ -129,9 +162,17 @@ in-kernel IPC queue, and the file system — see
 - **Fairness (quantitative):** `cfs_share` reports CPU-share % per priority
   (run with `CPUS=1`).
 - **Sandbox:** `agentdemo` confirms jail confinement, `..`/outside-path denial,
-  privilege-escalation denial, and `exec`/`kill` blocking.
+  privilege-escalation denial, and that the confirm-escape v2 gate fires on
+  `exec`/`kill`/`mknod` (both allow and deny paths reach demo *done*).
 - **Agent loop:** multi-step tool-call success + conversation-memory reuse on a
   live Solar session.
+- **Regression (host-driven):** `tools/ralph_battery.py` (26 shell/syscall
+  scenarios) + `tools/ralph_natlang.py` (39 NL scenarios in mock mode) —
+  **65 / 65 GREEN** on `cc40a08`. Isolated ports (5555 / 6666) and per-run
+  `fs.img` copies mean they coexist with a developer's 4444 session.
+- **Adversarial reproduction:** `tools/sec_audit.py` (on `origin/Dongjin`)
+  classifies a sandbox finding as `RESULT=VULNERABLE` / `SAFE`; same harness
+  doubles as the regression check that the fix actually flips the result.
 
 ---
 
@@ -163,15 +204,42 @@ in-kernel IPC queue, and the file system — see
 - **Action items:** June → evaluation automation + docs; SeungBeom → security
   guards; Se-Joong → jail rewrite + cache.
 
-### M4 — Week 13 · Hardening & dry-run (around 2026-05-26)
+### M4 — Week 13a · Hardening & dry-run (around 2026-05-26)
 - **Attendees:** `[fill in]`
 - **Decisions:** add a regression harness before the dry-run; gate dangerous
-  syscalls behind a one-time host confirmation; freeze scope (F9 in, F10 out).
-- **Action items:** fix the 3 latent bugs; prepare the English slides and demo
-  capture; **merge all branches for the final deliverable**.
+  syscalls behind a one-time host confirmation (confirm-escape v1); freeze
+  scope (F9 in, F10 out).
+- **Action items:** fix the 3 latent bugs; investigate the confirm v1 panic;
+  prepare the English slides and demo capture; **merge all branches for the
+  final deliverable**.
 
-### M5 — Week 14 · Final prep `[fill in]`
-- Rehearse the English presentation; finalize README demo media.
+### M5 — Week 13b · Natural-language stabilisation (around 2026-05-28 → 05-31)
+- **Attendees:** `[fill in]`
+- **Decisions:** **replace confirm v1 with v2** (sleep/wakeup on a dedicated
+  channel + inline `try_inline_confirm_res()`); promote regression to a
+  **two-harness pair** (`ralph_battery` + `ralph_natlang`) with isolated ports
+  and per-run `fs.img` so they coexist with interactive sessions; the
+  acceptance bar for any further change is **65 / 65 GREEN**; **add a `spawn`
+  tool verb** so natural-language process-creation prompts flow through the
+  confirm gate; ship the **English deliverables** (README.en + Technical
+  Report + Development Process) on `main`.
+- **Action items:** Se-Joong → land `574c3d7` (PR #11); follow-up doc
+  consistency pass `b51938a` (PR #12). June → English README + the two `docs/`
+  reports.
+
+### M6 — Week 14 · Adversarial audit + final prep (around 2026-06-04)
+- **Attendees:** `[fill in]`
+- **Decisions:** keep `main` invariant under the audit ("main 불변");
+  Dongjin's audit + red-team harness land on `feature/dongjin-security-suite`
+  / `origin/Dongjin`; actual fixes for the 16 findings ship as **separate PRs**
+  (so the 65 / 65 baseline stays measurable); the audit's deadlock warning
+  (`p->lock` + `tickslock` ordering in `allocproc`) is recorded as a fix to
+  **not apply**.
+- **Action items:** triage the 4 HIGH/MEDIUM findings into ordered PRs
+  (#1 confirm self-resolve → #2 cache jail-root → #3 NICE self-scope → #4
+  wire-escape coverage); produce the **English presentation slides**
+  (Deliverable #4); capture demo media (`docs/media/`); rehearse the
+  presentation in English.
 
 ---
 
@@ -189,9 +257,18 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 | 6 | **Security:** `NICE` lacked a permission guard; `sys_procinfo` leaked stack data | Added the NICE guard; blocked the stack exposure | SeungBeom · 05-22 |
 | 7 | Unknown latent defects before the dry-run | **9-test regression harness** surfaced **3 bugs**, all fixed | Se-Joong · 05-26 |
 | 8 | Raw-mode REPL left a residual first character on backspace | Rewrote the line editor | Se-Joong · 05-26 |
-| 9 | Confirm-escape branch caused a `kerneltrap` **panic** | Temporarily disabled that branch to keep the kernel stable | Se-Joong · 05-26 |
+| 9 | Confirm-escape v1 caused a `kerneltrap` **panic** (yield-poll wakeup race against the ISR) | Temporarily disabled the branch to keep the kernel stable (`40bf608`) | Se-Joong · 05-26 |
 | 10 | `agent.py` tool calls timed out under slow API responses | Raised timeout 12 s → 24 s + one marker retry | Se-Joong · 05-26 |
 | 11 | F6 proposal said "parse JSON in the kernel," which conflicts with xv6's no-float/no-heap rules and kernel safety | **Decision:** parse on the host; document the rationale in the report | June · 05-20 |
+| 12 | Wakeup race in confirm v1 (yield-polling shared state with the ISR) made re-enabling unsafe | **Confirm-escape v2** — sleep on `&confirm_wait_chan`, wake from `clockintr` (15 s) or inline `try_inline_confirm_res()` in `agentcmd.c`; bypasses the agent queue | Se-Joong · 05-28 |
+| 13 | `consolewrite()` from `agentd` interleaved with raw `REQ\|` payload bytes, producing a **wire byte-race** | `console.c` now **skips echoing** the payload of `REQ\|` lines (the kernel still receives every byte) | Se-Joong · 05-28 |
+| 14 | Same `:ask <prompt>` missed on the 2nd call (Issue A) — `_cache_lookup` strip-normalize was asymmetric (store vs lookup) | Made stripping symmetric so identical prompts collide on the same key | Se-Joong · 05-28 |
+| 15 | LLM tasks like *"make a process that prints hello"* had no path into the sandbox | Added the **`spawn` tool verb** (`SPAWN|<bin>|<argv>` → `agentd do_spawn` → fork+exec in jail → confirm-escape v2); `populate_jail()` hard-links `echo`/`sh`/`cat`/`ls`/… so `exec` resolves | Se-Joong · 05-28 |
+| 16 | Solar dropped a token when a Korean particle abutted a number (e.g. `"22 + 45는?"`) — looked like a kernel bug | Confirmed upstream (Solar tokenizer); added a *token-boundary* clause to `SYSTEM_PROMPT`; documented the user workaround | Se-Joong · 05-28 |
+| 17 | Single 9-test regression harness was hitting its scope ceiling | Promoted to a **harness pair** with isolated ports — `tools/ralph_battery.py` (26 shell/syscall, port 5555) + `tools/ralph_natlang.py` (39 NL, port 6666). **Cumulative 65 / 65 GREEN** on `cc40a08` | Se-Joong · 05-28 |
+| 18 | Adversarial audit (06-04) **reproduced** that jailed `NICE` is not self-scoped — a jailed agent could renice any user-class proc → scheduling DoS | Reproduction binary `user/secnice.c` + `tools/sec_audit.py` (`RESULT=VULNERABLE`); proposed ~3-line fix (`if (myproc()->is_agent && pid != myproc()->pid) return -1;`) on a separate PR (main 불변) | Dongjin · 06-04 |
+| 19 | Audit also flagged 3 more HIGH/MEDIUM paths (confirm-`CONFIRM_RES` self-resolution, `/cache.bin` resolving under `jail_root`, wire-escape gaps on `read`/`write` filenames + `spawn` argv) | Documented in `SECURITY_AUDIT.md` (`origin/Dongjin`) with `file:line`, severity, fix risk, status; gated through separate PRs to keep the 65 / 65 baseline measurable | Dongjin · 06-04 |
+| 20 | Audit's own "false-positive guard": one proposed fix would create an **A-B / B-A deadlock** between `p->lock` and `tickslock` (vs `clockintr`) | Recorded as a fix to **not apply**; alternative is to leave `allocproc`'s ticks read as a benign race | Dongjin · 06-04 |
 
 ---
 
@@ -199,21 +276,29 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 
 ### What went well *(잘된 점)*
 - **Real OS mechanisms, not a wrapper.** CFS, priority classes, a chroot jail,
-  an in-kernel command queue, and new syscalls are all genuinely in the kernel.
-- **Defense in depth.** Three independent layers (deny-list → blocked syscalls →
-  jail) bound what the LLM can do.
+  an in-kernel command queue, sleep/wakeup on a dedicated confirm channel, and
+  new syscalls are all genuinely in the kernel.
+- **Defense in depth.** Four independent layers now bound what the LLM can do —
+  deny-list → confirm-escape v2 → blocked syscalls / jail → tool whitelist.
 - **PR + personal-branch workflow** kept the trunk buildable and gave every
-  change a review.
-- **Evaluation is automated** (Test 3 pass/fail, `cfs_share` numbers), not just
-  eyeballed — and a regression harness caught real bugs before the dry-run.
+  change a review (PR #1 → #12).
+- **Evaluation is automated and load-bearing.** Test 3 pass/fail and `cfs_share`
+  numbers, plus the `ralph_battery` + `ralph_natlang` pair at **65 / 65 GREEN**,
+  catch regressions before they reach review.
+- **Adversarial review before submission.** The 06-04 audit found 16 real
+  issues (1 already reproduced); none of those are blockers because the
+  audit is additive and the regression baseline is preserved.
 
 ### What was hard *(어려웠던 점)*
 - Interrupt-context constraints (no fork/file-I/O in `consoleintr`) forced the
-  queue + worker split.
+  queue + worker split *and* the inline `try_inline_confirm_res()` shortcut.
 - xv6's no-float / no-dynamic-allocation rules shaped several decisions (F6,
   integer-only CFS math, fixed-size buffers).
-- Kernel-stability regressions (boot order, confirm-escape panic) cost real time
-  and motivated the regression harness.
+- Kernel-stability regressions (boot order, confirm v1 panic, wire byte-race)
+  cost real time and motivated the regression promotion to a harness pair.
+- Getting confirm-escape **right** took two attempts: v1 yield-polled and
+  raced; v2 had to be a real sleep/wakeup with a clockintr timeout and an
+  inline path that doesn't go through the agent queue.
 
 ### What we'd do differently *(개선점)*
 - Add the regression harness **earlier** — several latent bugs would have been
@@ -221,13 +306,22 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 - Tighten the `.gitignore` from the start (the `mkfs` breakage hit fresh clones).
 - Keep personal branches merged more frequently to avoid divergence near the
   deadline.
+- **Run the adversarial audit before feature freeze, not after.** Of the 16
+  findings the audit surfaced, several (e.g. `CONFIRM_RES` self-resolution,
+  `_wire_escape` coverage gaps) were design-level oversights that would have
+  been cheaper to fix while the surrounding code was still being written.
 
-### Remaining before Week 14 *(남은 일)*
-- Produce the **English presentation slides** (Deliverable #4).
-- Capture demo screenshots / GIF for the README.
-- **Merge the personal branches** into a single canonical state for submission.
+### Remaining before the final presentation *(남은 일)*
+- **English presentation slides** (Deliverable #4) — not yet started.
+- **Demo capture** for `docs/media/` (asciinema → GIF; placeholders in the
+  English README list the exact commands).
+- **Audit triage on `feature/dongjin-security-suite`** — at minimum land PRs for
+  findings #1 (confirm self-resolve), #2 (cache jail-root), #3 (NICE
+  self-scope), #4 (wire-escape gaps). Each PR must keep the 65 / 65 baseline.
+- Final rehearsal of the English presentation.
 
-> *(KR: 제출 전 반드시 — 영어 슬라이드 작성, 데모 캡처, 개인 브랜치 최종 통합.)*
+> *(KR: 제출 전 반드시 — 영어 슬라이드 작성, 데모 캡처, 보안 감사 4건 별도 PR
+> 정리, 영어 리허설.)*
 
 ---
 
@@ -237,3 +331,9 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 - Setup / run / demo: [../README.en.md](../README.en.md) (English) · [../README.md](../README.md) (Korean)
 - Code-referenced detail: [../Implementation.md](../Implementation.md)
 - Feature status: [../plan.md](../plan.md) · Change log: [../CHANGELOG.md](../CHANGELOG.md)
+- Korean weekly status: [../Weekly_Development_Process.md](../Weekly_Development_Process.md) *(Week 9 → 14 진행 요약)*
+- **Adversarial audit (on `origin/Dongjin`, additive):** `SECURITY_AUDIT.md`
+  (16 findings, file:line, severity, status) + `tools/sec_audit.py`
+  (red-team harness) + `xv6-riscv/user/secnice.c` (NICE-escalation
+  reproduction). Audit branch: `feature/dongjin-security-suite` →
+  pushed to `origin/Dongjin` (commits `24202ad`/`c9e2875`, 2026-06-04).

@@ -91,7 +91,7 @@ The guiding invariant throughout:
 | AIOS responsibility | Our mechanism | Files |
 | ------------------- | ------------- | ----- |
 | **Agent Scheduler** | In-kernel CFS with Linux weights; new processes seeded at global `min_vruntime` | `kernel/proc.c`, `kernel/trap.c` |
-| **Tool Manager** | 2-stage command dispatch + configurable deny-list + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/sysproc.c`, `user/agentd.c` |
+| **Tool Manager** | 2-stage command dispatch + configurable deny-list + confirm-escape v2 gate + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/confirm.c`, `kernel/sysproc.c`, `user/agentd.c` |
 | **LLM-Kernel bridge** | Host ReAct loop over the QEMU serial port; `REQ\|` wire protocol; observation markers; `:ask` cache path | `agent.py` |
 
 ---
@@ -181,8 +181,16 @@ argument-fetch + dispatch path.
   `path` and sets `is_agent = 1`. It is **irreversible** by design.
 - **Path resolution** — `namex()` in `kernel/fs.c` maps an agent's `/` to its
   `jail_root` and refuses `..` traversal above the jail root.
-- **Dangerous-syscall block** — `kernel/syscall.c` returns −1 for `exec`,
-  `kill`, and `mknod` when the caller `is_agent`.
+- **Dangerous syscalls — confirm-escape v2 *(from 2026-05-28)*** — `kernel/syscall.c`
+  no longer hard-denies. For `is_agent` processes, `exec`/`kill`/`mknod` route
+  through `kernel/confirm.c`: the calling syscall sleeps on
+  `&confirm_wait_chan` while the kernel prints `CONFIRM_REQ|<pid>|<verb>|...`
+  to the host. The host (`agent.py`) prompts the operator for `y`/`N`; the
+  response comes back as `REQ|CONFIRM_RES|<pid>|y|n`, the kernel takes the
+  inline path (`try_inline_confirm_res()` in `agentcmd.c`, bypassing the
+  command queue), and wakes the channel. A `clockintr`-driven `confirm_tick`
+  enforces a **15 s timeout (default deny)**. `confirm_kill`/`confirm_mknod`
+  exercise the gate directly.
 - **Configurable deny-list** — no longer hardcoded. A spinlock-guarded kernel
   RAM list (default `{KILL, EXEC}`) gates wire commands; `set_deny`/`get_deny`
   syscalls plus the `denyctl` shell tool manage it (list/add/rm/reset/save/load),
@@ -211,6 +219,12 @@ processes.
   overlay — which is precisely *why* command dispatch had to be split into two
   stages (see §6.1): a transaction can sleep, and sleeping is illegal in the
   console interrupt handler.
+- **Sleep/wakeup on a dedicated channel.** Confirm-escape v2 puts the trapping
+  syscall to sleep on `&confirm_wait_chan` in `kernel/confirm.c`; the wakeup
+  comes from either `clockintr` (15 s timeout) or the inline
+  `try_inline_confirm_res()` path in `agentcmd.c`. Using a dedicated channel —
+  rather than v1's yield-poll — was the fix for the wakeup race that surfaced
+  on 2026-05-26.
 
 ### 4.6 Concurrency / IPC — the command channel & multi-agent *(Tool Manager)*
 
@@ -343,6 +357,7 @@ it via `SETPRIO <FN>:<prio>`.
 | PS      | 1       | 8        | **AI self-observation** — proc snapshot (pid/state/prio/name) |
 | HELP    | 1       | 0        | **AI self-observation** — usage catalogue |
 | CHAT    | 1       | —        | prints a cache-sourced answer |
+| SPAWN   | 1       | —        | `do_spawn` → fork + exec inside the jail; `exec` triggers confirm-escape v2 (host y/N) |
 
 **AI self-observation.** `PS` uses a new `procinfo(buf,max)` syscall
 (`kernel/procinfo.h`) to return a process-table snapshot, so the LLM can discover
@@ -361,6 +376,8 @@ how to call a tool at runtime. Data comes from the kernel, formatting happens in
 
 ### 6.4 Evaluation harness
 
+In-kernel tests *(invoked from the xv6 shell):*
+
 - **`priority_test` Test 3** spawns HIGH(1)/MED(10)/LOW(19) CPU burners and
   **programmatically verifies the finish order** (HIGH→MED→LOW) over a pipe;
   wrong order exits FAIL. Burn count is 30M so scheduling dominates startup noise.
@@ -370,11 +387,82 @@ how to call a tool at runtime. Data comes from the kernel, formatting happens in
   `eval cache <N>` (round-1 miss vs round-2 hit rate), `eval acl <N>` (per-role
   ACL deny rate against a live child), `eval fair <I>` (prio 0 vs 20 completion
   time), `eval semantic <N>` (exact / paraphrase / unrelated matching).
-- **`agentdemo`** checks jail read, `..`/outside-path denial, escalation denial,
-  and `exec` blocking. **`cache_test`** validates RAM-hit / evict / disk-promote
-  (13/13). **`write_race`** shows inode-sleeplock serialization.
-- **`tools/regression.py`** builds, boots, and runs a multi-case regression
-  suite (it caught 3 latent bugs before the Week-13 dry-run).
+- **`agentdemo`** — five checks (jail read, `..`/outside-path denial,
+  escalation denial, `exec` confirm-escape allow path, `exec` confirm-escape
+  deny path) all reach the demo's *done* state. **`cache_test`** validates
+  RAM-hit / evict / disk-promote (13/13). **`write_race`** shows inode-sleeplock
+  serialization. **`confirm_kill`** / **`confirm_mknod`** drive the
+  confirm-escape gate against direct `SYS_kill` / `SYS_mknod` callers.
+
+Headless host-driven regression *(run from the repo root):*
+
+- **`tools/ralph_battery.py`** — **26 shell/syscall scenarios** (cache,
+  priority, jail, sandbox, deny-list, write-race, agent self-observation,
+  multi-agent, ASK miss-then-hit, …). Uses an **isolated TCP port `5555`**
+  and a per-run `fs.img` copy so it can run alongside a developer's
+  interactive 4444 session.
+- **`tools/ralph_natlang.py`** — **39 natural-language scenarios** that drive
+  `agent.py` in **mock mode** end-to-end (file ops, deny-list, role ACL,
+  confirm-escape allow / deny / timeout, `:ask` HIT / MISS, …). Isolated TCP
+  port `6666`, per-run `fs.img` copy.
+- **Cumulative result on `main` (2026-05-28):** **65 / 65 GREEN.** The earlier
+  9-test harness (`tools/regression.py`, 2026-05-26) caught the latent bugs that
+  motivated promoting regression to a first-class artifact and was then
+  superseded by this pair.
+
+### 6.5 Confirm-escape v2 — why v1 was replaced
+
+The first cut of confirm-escape (`ac013d6`, 2026-05-26) printed `CONFIRM_REQ|…`
+and then **yield-polled** for the host's `y/N`. The wakeup race that caused the
+`kerneltrap` panic noted in the old §7.2 came from polling state shared with an
+interrupt handler. v2 (`574c3d7`, 2026-05-28) rebuilt the gate as a textbook
+sleep/wakeup:
+
+1. The trapping syscall (`exec` / `kill` / `mknod` for an `is_agent` proc) calls
+   `confirm_request(verb, …)` in `kernel/confirm.c`, which records a single
+   pending pid + verb under `confirm_lock`, prints `CONFIRM_REQ|…`, then
+   **`sleep(&confirm_wait_chan, &confirm_lock)`**.
+2. The host's `y` / `n` arrives as `REQ|CONFIRM_RES|<pid>|y|n` on the console.
+   To avoid getting stuck behind the agent's own queued work,
+   `agent_dispatch_now()` first calls `try_inline_confirm_res()` in
+   `kernel/agentcmd.c`, which short-circuits straight to `confirm_resolve()` —
+   **bypassing `agentq` entirely** (the queue is for agent-bound work; the
+   response is for the kernel).
+3. `clockintr` calls `confirm_tick()` once per tick; after 15 s with no answer
+   it stores `DENY` and wakes the channel.
+4. The sleeping syscall wakes, reads the resolution, and either continues into
+   the real syscall handler or returns `−1`.
+
+`console.c` was also patched to **skip echoing the payload of any `REQ|` line**
+to the operator's terminal: the prior behaviour interleaved with `consolewrite()`
+output from `agentd` and produced a wire byte-race. Stripping the echo on the
+console side is enough — the kernel still receives every byte.
+
+### 6.6 The `spawn` tool verb (`do_spawn` + `populate_jail`)
+
+To answer natural-language prompts like *"make a process that prints hello"*,
+the LLM emits an `agent.py` tool call that wire-encodes to `REQ|SPAWN|<bin>|<argv…>`.
+Inside the jailed worker, `agentd`'s `do_spawn` does `fork()` then `exec()` — and
+because the child is still `is_agent`, the `exec` traps into confirm-escape v2
+and the host operator gets to allow or deny it. `wait()` reaps so a runaway
+prompt can't fork-bomb (DoS posture is *one outstanding spawn per line*).
+
+For `exec` to find binaries at all, `init` (`user/init.c`) calls
+**`populate_jail()`** before `agentd` enters the jail: it `link(2)`s a small
+curated set (`echo`, `sh`, `cat`, `ls`, `grep`, …) from the root file system
+into `/agentbox`. Hard-linking — not copying — keeps `fs.img` small and means
+the jail and host see the same inode (the jail still cannot escape, because
+`namex()` refuses `..` above `jail_root`).
+
+### 6.7 Cache lookup strip-normalize (Issue A)
+
+The cache's exact-match path normalises both the stored key and the lookup
+key (`_cache_lookup` in `kernel/cache.c`) by stripping a small set of
+whitespace / quoting variations. The original implementation normalised only
+the lookup side, so identical prompts stored slightly differently would miss
+the second time. The 2026-05-28 fix made stripping symmetric, which is what
+flips the second `:ask <same prompt>` from MISS to `[cache HIT]` in the
+README's demo transcript.
 
 ---
 
@@ -401,22 +489,72 @@ This is recorded explicitly because it departs from the proposal's wording. A
 kernel-side mini-parser (`kernel/json.c`) is noted as optional future work with
 low priority (security/maintenance cost outweighs learning value).
 
-### 7.2 Confirm-escape is prototyped but disabled
+### 7.2 Confirm-escape v2 is enabled *(superseded the old caveat)*
 
-`kernel/confirm.c` implements a "confirm-escape": instead of hard-denying an
-agent's `exec`/`kill`/`mknod`, it prints `CONFIRM_REQ|...` to the console so the
-host (`agent.py`) can prompt the user for a one-time `y/N` allow (5 s timeout).
-It is **currently disabled** (`syscall.c` keeps the unconditional block) because
-of a suspected `kerneltrap` panic in that path. Re-enabling it after root-causing
-the panic, and extending it from single-pending to a queue, is future work.
+The previous draft of this report flagged confirm-escape as *disabled* because
+the v1 yield-poll implementation caused a `kerneltrap` panic
+(`40bf608`, 2026-05-26 — branch disabled). The 2026-05-28 stabilisation round
+(`574c3d7`) replaced it with v2 (sleep/wakeup on a dedicated channel + inline
+`try_inline_confirm_res()`, see §6.5) and **re-enabled** the gate. The two
+limitations that remain on this path:
 
-### 7.3 Out of scope
+- **Single-pending design.** Only one `is_agent` syscall can be awaiting
+  confirmation at a time; concurrent dangerous calls would serialise on
+  `confirm_lock`. Adequate at the project's scale (one operator, one agent
+  loop) but worth queueing if multiple agent processes ever block on confirm
+  simultaneously.
+- **Nonce binding.** `confirm_resolve(pid, allow)` matches only on pid — no
+  generation counter. The adversarial audit (`origin/Dongjin`,
+  [SECURITY_AUDIT.md](https://github.com/dongjinka/2026-OS-Team-Project/blob/Dongjin/SECURITY_AUDIT.md)
+  #1) identifies this as a path through which a jailed agent could self-resolve
+  by issuing `sys_dispatch("REQ|CONFIRM_RES|<self>|y")`. The proposed mitigation
+  is to (a) refuse `CONFIRM_RES` from `is_agent` callers in `sys_dispatch`, and
+  (b) bind a per-request generation nonce into the wire format. Both changes
+  are scoped to a separate PR; see §7.5.
+
+### 7.3 Solar tokenizer boundary
+
+A small set of prompts where a Korean particle abuts a number (e.g. `"22 + 45는?"`)
+can drop a token in the Solar response. `agent.py`'s wire path is byte-perfect
+(confirmed by the `_reader` multibyte fix on 2026-05-22 and the
+`REQ|` echo-skip on 2026-05-28), so the corruption is upstream of the kernel.
+The mitigation is a standalone *token-boundary* clause in `SYSTEM_PROMPT` plus a
+user workaround (insert a space, drop the quotes). Not a kernel bug — but
+documented here because it can otherwise look like one.
+
+### 7.4 Out of scope
 
 - **F10 — idle-time LoRA training:** infeasible in xv6 (RISC-V, no float, tiny
   memory/disk). At most a conceptual stub ("detect idle ticks → signal the host
   to train"). Out of scope.
 
-### 7.4 Measurement caveats
+### 7.5 Adversarial audit findings (in flight on `origin/Dongjin`)
+
+A 7-dimension adversarial audit of the custom code (command path · jail ·
+confirm-escape · F9 cache · host bridge) lives on the
+**`origin/Dongjin`** branch (commits `c9e2875`, `24202ad`, 2026-06-04;
+`SECURITY_AUDIT.md` at the repo root). It is **additive** — `main` is kept
+invariant under the audit's "main 불변" rule, so fixes ship as separate PRs.
+Raw 20 candidates → **16 confirmed** (4 rejected / downgraded). One is
+already reproduced by the red-team harness (`tools/sec_audit.py`):
+
+| # | Severity | Issue | Status |
+|---|----------|-------|--------|
+| #1 | HIGH | `CONFIRM_RES` self-resolution path (see §7.2 nonce note) | patch ready |
+| #2 | HIGH | `/cache.bin` resolves under `jail_root` when called from an `is_agent` context → cache split-brain | patch ready |
+| #3 | MEDIUM | Jailed `NICE` is not self-scoped (`sys_setpriority` has no `is_agent && pid != self` guard) → scheduling DoS | **reproduced** |
+| #4 | MEDIUM | `agent.py:wire_for` skips `_wire_escape` on `read` / `write` filenames and `spawn` argv → newline injection | patch ready |
+| #5 | MEDIUM | Default deny-list `{KILL, EXEC}` doesn't cover `SPAWN` — the actual `exec` surface | documentation backlog |
+
+Plus 4 LOW (cache disk-size guard unreachable, intake-ring silent drop, confirm
+`confirm_tick` lock-less read, host `tcflush` REPL contention).
+
+**Caveat (documented in the audit itself):** one of the proposed fixes — holding
+`p->lock` while acquiring `tickslock` in `allocproc` — would create an A-B / B-A
+deadlock against `clockintr` and must not be applied. That is why fixes are
+gated through a separate PR and not auto-applied.
+
+### 7.6 Measurement caveats
 
 - `cfs_share` / `eval fair` percentages are environment-dependent (host load,
   QEMU timing); use them as relative evidence of the weight effect, not absolute
