@@ -66,15 +66,20 @@ The guiding invariant throughout:
  │    ├─ ASK ─► F9 cache lookup                                       │
  │    │         · HIT  → forward answer to agentd (Solar skipped)     │
  │    │         · MISS → LLM_REQ to host ─► LLM_RESP ─► cache_set     │
+ │    ├─ CONFIRM_RES ─► try_inline_confirm_res (wake &confirm_wait_chan) │
  │    └─ else ─► deny-list check (configurable) ─► agentq enqueue     │
  │                                   │ sys_agent_recv (is_agent only) │
  │                                   ▼                                │
  │   ┌────────────────────────────────────────────────────────────┐ │
  │   │  user/agentd   (jailed: chroot=/agentbox, is_agent=1)       │ │
  │   │   tools: PRINT CHAT READ WRITE LS NICE LIST SETPRIO PS HELP │ │
- │   │   exec / kill / mknod → denied                             │ │
+ │   │          + SPAWN (fork+exec → confirm-escape on exec)       │ │
+ │   │   exec / kill / mknod → confirm-escape gate (host y/N, 15s) │ │
  │   │   before each tool: setpriority(self, fn.priority)          │ │
  │   └────────────────────────────────────────────────────────────┘ │
+ │                                                                    │
+ │   confirm.c  (sleep on &confirm_wait_chan; clockintr → confirm_tick │
+ │               timeout 15s = default deny)                          │
  │                                                                    │
  │   ┌────────────────────────────────────────────────────────────┐ │
  │   │  CFS scheduler  — cfs_weight[41] · vruntime ·              │ │
@@ -91,8 +96,8 @@ The guiding invariant throughout:
 | AIOS responsibility | Our mechanism | Files |
 | ------------------- | ------------- | ----- |
 | **Agent Scheduler** | In-kernel CFS with Linux weights; new processes seeded at global `min_vruntime` | `kernel/proc.c`, `kernel/trap.c` |
-| **Tool Manager** | 2-stage command dispatch + configurable deny-list + confirm-escape v2 gate + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/confirm.c`, `kernel/sysproc.c`, `user/agentd.c` |
-| **LLM-Kernel bridge** | Host ReAct loop over the QEMU serial port; `REQ\|` wire protocol; observation markers; `:ask` cache path | `agent.py` |
+| **Tool Manager** | 2-stage command dispatch + configurable deny-list + ring-buffer queue + jailed `agentd` with a tool whitelist + F9 cache orchestration + **confirm-escape v2** gate for `exec`/`kill`/`mknod` + **`spawn` tool verb** | `kernel/agentcmd.c`, `kernel/deny.h`, `kernel/cache.c`, `kernel/confirm.c`, `kernel/sysproc.c`, `user/agentd.c` |
+| **LLM-Kernel bridge** | Host ReAct loop over the QEMU serial port; `REQ\|` wire protocol; observation markers; `:ask` cache path; **`CONFIRM_REQ`/`CONFIRM_RES` host y/N handler** | `agent.py` |
 
 ---
 
@@ -105,7 +110,7 @@ The guiding invariant throughout:
 | Transport | QEMU `-serial tcp:127.0.0.1:4444` | Lets a host process speak to the kernel console |
 | Host bridge | Python 3 + `openai` SDK | Solar is OpenAI-API-compatible (swap `base_url`/`api_key`) |
 | LLM | Upstage Solar Pro (`solar-pro2`) | Course-provided backend |
-| Build / test | GNU Make; `tools/regression.py` | xv6 build + a multi-case regression harness |
+| Build / test | GNU Make; `tools/ralph_battery.py` (26 shell/syscall scenarios) + `tools/ralph_natlang.py` (39 natural-language scenarios, mock mode) | xv6 build + **65/65 automated regression**; both harnesses run on isolated ports (5555 / 6666) with per-run `fs.img` copies so they don't disturb an interactive 4444 session |
 
 No floating point and no dynamic allocation are used in any kernel-side
 addition — both are restricted in xv6, so all new kernel code uses fixed-size
@@ -285,6 +290,7 @@ user request
   `REQ|READ|<file>`, `REQ|WRITE|<file>:<text>`, `REQ|PRINT|<msg>`,
   `REQ|NICE|<pid>:<prio>`, `REQ|LIST|`, `REQ|SETPRIO|<FN>:<prio>`,
   `REQ|PS|`, `REQ|HELP|`, with an optional `agent:<role>|` prefix.
+  Multi-line payloads escape `\n` → `\\n` on the agent.py side (`_wire_escape`) and `unescape_inplace()` restores them in `agentd`.
 - **Marker-based capture:** right after the real command, the bridge sends
   `REQ|PRINT|__OBS<n>__`. Because `agentd` drains the queue in order, every line
   printed *before* the marker's echo is exactly that tool's output — so the

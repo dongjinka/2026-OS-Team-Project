@@ -48,7 +48,17 @@ SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 DEFAULT_MODEL = "solar-pro2"      # override via UPSTAGE_MODEL
 MAX_STEPS = 8                     # tool calls allowed per user request
 MAX_HISTORY = 24                  # chat messages kept besides the system prompt
-WIRE_MAX = 1200                   # max bytes for one REQ| line (kernel intake cap)
+# ── kernel wire buffer limits (mirror the fixed-size buffers in the kernel;
+# the host MUST stay under them or the kernel silently truncates the line) ──
+WIRE_MAX = 1200                   # meta REQ| line budget — kernel agent_q is
+                                  # AGENT_LINE_MAX=1280 (agentcmd.c); 1200 leaves margin
+AGENTD_WIRE_MAX = 255             # tool wires are re-copied into the jailed agentd's
+                                  # 256-byte queue (AGENTQ_LEN, agentcmd.c) and
+                                  # truncated past this — far tighter than WIRE_MAX
+CACHE_VAL_MAX = 1024              # kernel CACHE_VAL (cache.c) — a longer value is
+                                  # DROPped, not cached, so don't bother sending it
+MAX_CAPTURE = 1 << 20            # cap on one tool's captured output (1 MiB) so a
+                                  # runaway tool can't grow host memory without bound
 
 
 def load_dotenv():
@@ -370,6 +380,38 @@ def _drain_escape(fd: int) -> None:
             break
 
 
+def _recover_surrogates(s: str) -> str:
+    """Repair input decoded with the ``surrogateescape`` handler.
+
+    Under the C / C.UTF-8 locale Python opens stdin as utf-8 *with*
+    errors="surrogateescape", so any byte the line reader can't fold into a
+    clean UTF-8 unit (e.g. a CJK syllable the terminal/IME delivered split)
+    survives as a lone surrogate (U+DC80–U+DCFF). Such surrogates pass through
+    the REPL unharmed but blow up the first time we do ``.encode("utf-8")`` for
+    the kernel wire — the default strict codec rejects them ("surrogates not
+    allowed"), which is the crash behind a Korean prompt killing the agent.
+
+    Re-encoding with surrogateescape recovers the original raw bytes; when they
+    were in fact valid UTF-8 (the common case — a split syllable) decoding puts
+    the real character back. Anything genuinely undecodable becomes U+FFFD, so
+    the returned string is *always* safe to ``.encode("utf-8")`` downstream."""
+    if not any("\ud800" <= c <= "\udfff" for c in s):
+        return s            # fast path: already clean, no surrogate, no copy
+    return s.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+def _wire_fits(wire: str, limit: int) -> bool:
+    """True if `wire` fits within `limit` bytes on the kernel wire.
+
+    Measured with surrogateescape so the byte count matches exactly what
+    `_send` transmits AND so a lone surrogate (from surrogateescape-decoded
+    stdin) can never raise here — the strict default codec would, which was
+    the crash behind a Korean prompt killing the agent. Callers that exceed
+    the limit must refuse to send rather than let the kernel truncate the
+    line (which corrupts the cache / desyncs the protocol)."""
+    return len(wire.encode("utf-8", "surrogateescape")) <= limit
+
+
 def _read_line(prompt: str) -> str:
     """Read one REPL line.
 
@@ -403,7 +445,7 @@ def _read_line(prompt: str) -> str:
             sys.stdout.flush()
             _cursor = "other"
         try:
-            return input()
+            return _recover_surrogates(input())
         except (EOFError, KeyboardInterrupt):
             raise
 
@@ -479,7 +521,7 @@ def _read_line(prompt: str) -> str:
             _input_buf = ""
             _raw("\n")
             _cursor = "start"
-    return line
+    return _recover_surrogates(line)
 
 
 class Agent:
@@ -556,7 +598,10 @@ class Agent:
     def _send(self, wire: str) -> None:
         try:
             with self._send_lock:
-                self.sock.sendall((wire + "\n").encode("utf-8"))
+                # surrogateescape: never let a stray lone surrogate (from
+                # surrogateescape-decoded stdin) raise at the wire boundary —
+                # round-trip its raw byte to the kernel instead of crashing.
+                self.sock.sendall((wire + "\n").encode("utf-8", "surrogateescape"))
         except OSError as e:
             warn(f"[bridge] send failed: {e}")
 
@@ -589,7 +634,10 @@ class Agent:
                 return
             text = decoder.decode(chunk).replace("\r", "")
             with self.cap_lock:
-                if self.capturing:
+                if self.capturing and len(self.capture_buf) < MAX_CAPTURE:
+                    # bound growth so a runaway tool can't exhaust host memory;
+                    # if capped, the marker may be missed but wait_for_marker's
+                    # timeout + one-shot retry already covers that.
                     self.capture_buf += text
             pending += text
             while "\n" in pending:
@@ -655,6 +703,17 @@ class Agent:
         if wire is None:
             return f"ERROR: unknown tool '{tool}' or bad arguments {args}"
 
+        # The whole "REQ|<wire>" line is re-copied into the jailed agentd's
+        # 256-byte queue and silently truncated past AGENTD_WIRE_MAX. Refuse
+        # rather than send a truncated command (a clipped WRITE corrupts the
+        # file) — the model sees this observation and can shorten / split.
+        full = "REQ|" + wire
+        if not _wire_fits(full, AGENTD_WIRE_MAX):
+            n = len(full.encode("utf-8", "surrogateescape"))
+            return (f"ERROR: tool command {n} B exceeds the {AGENTD_WIRE_MAX} B "
+                    f"agentd wire limit — shorten the file path/content or write "
+                    f"fewer bytes per call")
+
         # A marker command runs right after the real one; agentd processes
         # the queue in order, so everything printed before "[agentd] <marker>"
         # is exactly this tool's output.
@@ -666,7 +725,7 @@ class Agent:
         with self.cap_lock:
             self.capture_buf = ""
             self.capturing = True
-        self._send("REQ|" + wire)
+        self._send(full)
         self._send(marker_echo)
 
         # Wait up to 24 s for the marker. agentd processes the queue
@@ -802,6 +861,12 @@ class Agent:
         # One wire command per line: collapse any newlines the LLM emitted so
         # the embedded text can't split the LLM_RESP line on the kernel side.
         wire = self._translate(prompt).replace("\n", " ").replace("\r", " ")
+        # Never let an over-long translation truncate at the kernel intake (which
+        # desyncs the line) — fall back to a short, well-formed response so the
+        # kernel always gets a valid LLM_RESP and never blocks waiting on one.
+        if not _wire_fits(f"REQ|LLM_RESP|{wire}", WIRE_MAX):
+            warn("[bridge] LLM_RESP too long for the wire — sending short fallback")
+            wire = "CHAT|(response too long to cache)"
         self._send(f"REQ|LLM_RESP|{wire}")
 
     def _handle_confirm_req(self, line: str) -> None:
@@ -865,7 +930,7 @@ class Agent:
         below mirroring the store path.)"""
         key = question.replace("\n", " ").replace("\r", " ").strip()
         wire = "REQ|CACHE_GET|" + key
-        if len(wire.encode("utf-8")) > WIRE_MAX:   # over the kernel line limit
+        if not _wire_fits(wire, WIRE_MAX):   # over the kernel line limit
             return None
         resp = self._cache_rpc(wire)
         if resp and resp.startswith("RESP|HIT|"):
@@ -883,11 +948,15 @@ class Agent:
             return
         # one wire line: collapse newlines so the value can't split the line.
         val = answer_text.replace("\r", "").replace("\n", "\\n")
-        klen = len(key.encode("utf-8"))
+        # a value longer than the kernel's CACHE_VAL slot is DROPped on store —
+        # don't bother sending it (surrogateescape so this never raises either).
+        if len(val.encode("utf-8", "surrogateescape")) > CACHE_VAL_MAX:
+            return
+        klen = len(key.encode("utf-8", "surrogateescape"))
         wire = f"REQ|CACHE_SET|{klen}:{key}{val}"
         # an over-long wire line would be truncated by the kernel intake buffer
         # and corrupt the cache — skip it (the answer just won't be cached).
-        if len(wire.encode("utf-8")) > WIRE_MAX:
+        if not _wire_fits(wire, WIRE_MAX):
             return
         self._cache_rpc(wire)
 
@@ -993,9 +1062,15 @@ class Agent:
             if line.startswith(":ask "):
                 prompt = line[5:].strip()
                 if prompt:
-                    # fire-and-forget: the kernel handles cache/LLM_REQ and the
-                    # reader thread prints the result (or drives _handle_llm_req).
-                    self._send(f"REQ|agent:{self.role}|ASK|{prompt}")
+                    ask_wire = f"REQ|agent:{self.role}|ASK|{prompt}"
+                    if not _wire_fits(ask_wire, WIRE_MAX):
+                        n = len(ask_wire.encode("utf-8", "surrogateescape"))
+                        warn(f"[bridge] :ask prompt too long ({n} B > {WIRE_MAX} B) "
+                             f"— not sent")
+                    else:
+                        # fire-and-forget: the kernel handles cache/LLM_REQ and the
+                        # reader thread prints the result (or drives _handle_llm_req).
+                        self._send(ask_wire)
                 continue
             self.handle(line)
 
