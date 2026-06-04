@@ -351,10 +351,15 @@ handle_cache_get(char *arg)
   if(vlen < 0){
     printf("RESP|MISS\n");
   } else {
-    printf("RESP|HIT|");
-    if(vlen > (int)sizeof(valbuf)) vlen = sizeof(valbuf);
-    for(int i = 0; i < vlen; i++) consputc(valbuf[i]);
-    consputc('\n');
+    // Emit the whole RESP line in ONE printf() so it is atomic under the printf
+    // lock. The old code wrote the value via bare consputc() (UNLOCKED), so at
+    // smp>1 another CPU's console output interleaved into "RESP|HIT|<value>",
+    // and the host parsed the garbled line as a cache MISS — the F9 cache
+    // silently failed at the default `make qemu-agent` (smp=3). %s does not
+    // interpret '%' in the value, and cache values are nul-free text.
+    if(vlen >= (int)sizeof(valbuf)) vlen = sizeof(valbuf) - 1;
+    valbuf[vlen] = 0;
+    printf("RESP|HIT|%s\n", valbuf);
   }
 }
 

@@ -159,6 +159,9 @@ UPROGS=\
 	$U/_agentd\
 	$U/_confirm_kill\
 	$U/_confirm_mknod\
+	$U/_secnice\
+	$U/_secconfirm\
+	$U/_cfs_bench\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
@@ -191,8 +194,13 @@ QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 qemu: check-qemu-version $K/kernel fs.img
 	$(QEMU) $(QEMUOPTS)
 
+# Agent mode runs single-core on purpose: the F9 cache + confirm-escape paths
+# trip a known intermittent kernelvec trap-entry race (scause=0xf) ONLY at smp>1,
+# which panics the kernel and then silently breaks caching (every repeat re-calls
+# Solar). The interactive LLM agent needs no multicore. Use `make qemu CPUS=N`
+# for the SMP shell/CFS demos.
 qemu-agent: $K/kernel fs.img
-	$(QEMU) $(filter-out -nographic,$(QEMUOPTS)) -display none -serial tcp:127.0.0.1:4444,server,nowait
+	$(QEMU) $(filter-out -nographic -smp $(CPUS),$(QEMUOPTS)) -smp 1 -display none -serial tcp:127.0.0.1:4444,server,nowait
 
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@

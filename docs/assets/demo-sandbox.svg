@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="332" viewBox="0 0 760 332" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace">
+  <defs>
+    <style>
+      .win{fill:#0d1117;stroke:#30363d;stroke-width:1}
+      .bar{fill:#161b22}
+      .t{font-size:14px}
+      .prompt{fill:#58a6ff}
+      .user{fill:#c9d1d9}
+      .dim{fill:#8b949e}
+      .cap{fill:#8b949e;font-size:11px}
+      .ok{fill:#3fb950}
+      .deny{fill:#f85149}
+      .amber{fill:#d29922}
+      .confirm{fill:#21170a;stroke:#9e6a03;stroke-width:1}
+      .xv6{fill:#6e7681;font-size:13px}
+    </style>
+  </defs>
+
+  <rect class="win" x="2" y="2" width="756" height="328" rx="10"/>
+  <rect class="bar" x="2" y="2" width="756" height="32" rx="10"/>
+  <rect class="bar" x="2" y="18" width="756" height="16"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="380" y="22" text-anchor="middle" class="cap">xv6 LLM agent · sandbox</text>
+
+  <!-- spawn -> confirm-escape (approved) -->
+  <text x="24" y="62" class="t"><tspan class="prompt">you ▸ </tspan><tspan class="user">echo hello 출력하는 프로세스를 만들어줘</tspan></text>
+  <text x="40" y="84" class="dim t">▶ step 1 · spawn  bin=/echo  argv=['echo', 'hello']</text>
+  <rect class="confirm" x="24" y="94" width="600" height="28" rx="8"/>
+  <text x="36" y="112" class="t"><tspan class="amber">[jail] pid=5 — 위험 syscall 'exec' 호출 허용? (15s, y/N) </tspan><tspan class="ok"> ▸ y</tspan></text>
+  <rect class="ok" x="24" y="132" width="3" height="18"/>
+  <text x="36" y="146" class="t"><tspan class="xv6">xv6 </tspan><tspan class="ok">[agentd] SPAWN /echo done (status=0)  ✓ 승인됨</tspan></text>
+
+  <line x1="24" y1="166" x2="736" y2="166" stroke="#21262d" stroke-width="1"/>
+
+  <!-- jail read denied -->
+  <text x="24" y="194" class="t"><tspan class="prompt">you ▸ </tspan><tspan class="user">/etc/passwd 파일 내용을 읽어줘</tspan></text>
+  <rect class="deny" x="24" y="204" width="3" height="18"/>
+  <text x="36" y="218" class="t"><tspan class="xv6">xv6 </tspan><tspan class="deny">[agentd] READ: '/etc/passwd' not reachable inside jail</tspan></text>
+
+  <!-- renice peer denied (#3) -->
+  <text x="24" y="252" class="t"><tspan class="prompt">you ▸ </tspan><tspan class="user">pid 1 프로세스 우선순위를 19로 낮춰줘</tspan></text>
+  <rect class="deny" x="24" y="262" width="3" height="18"/>
+  <text x="36" y="276" class="t"><tspan class="xv6">xv6 </tspan><tspan class="deny">[agentd] NICE: denied (pid=1 prio=19)</tspan><tspan class="dim">   ← 타 프로세스 renice 거부 (#3)</tspan></text>
+
+  <text x="24" y="310" class="cap">사람의 셸 입력은 무제한 · LLM이 시킨 exec / jail-외부 접근 / 타 프로세스 변경만 게이트·차단</text>
+</svg>

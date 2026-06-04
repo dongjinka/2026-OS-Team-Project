@@ -206,18 +206,61 @@ def step(n, tool, args):
     _line(f"   ▶ step {n} · {tool}  {detail}".rstrip(), _YELLOW)
 
 
+def _wrap_display(s: str, width: int) -> list:
+    """Wrap `s` into pieces each at most `width` display columns wide (CJK
+    glyphs count as two). Breaks on spaces when possible, hard-breaks an
+    over-long unbroken run otherwise. Always returns >= 1 piece."""
+    pieces, cur = [], ""
+    for word in s.split(" "):
+        cand = word if not cur else cur + " " + word
+        if _disp_width(cand) <= width:
+            cur = cand
+            continue
+        if cur:
+            pieces.append(cur)
+            cur = ""
+        while _disp_width(word) > width:        # word alone exceeds the line
+            take = ""
+            for ch in word:
+                if _disp_width(take + ch) > width:
+                    break
+                take += ch
+            pieces.append(take)
+            word = word[len(take):]
+        cur = word
+    if cur or not pieces:
+        pieces.append(cur)
+    return pieces
+
+
 def answer(text):
-    """Print the model's final answer as a clearly delimited block."""
+    """Print the model's final answer as a clearly delimited block that adapts
+    to the terminal width and wraps long / wide (CJK) lines, so the text never
+    spills outside the box."""
     global _cursor
     with _LOCK:
         if _input_live:
             _wipe_input()
         elif _cursor != "start":
             _raw(_RST + "\n")
-        _raw(f"{_BOLD}{_CYAN}╭─ answer ──────────────────────────────────────╮{_RST}\n")
-        for ln in str(text).rstrip().split("\n"):
-            _raw(f"{_BOLD}{_CYAN}│{_RST} {ln}\n")
-        _raw(f"{_BOLD}{_CYAN}╰───────────────────────────────────────────────╯{_RST}\n")
+
+        maxw = max(20, min(_term_cols() - 4, 76))      # widest text area allowed
+        rows = []
+        for logical in str(text).rstrip().split("\n"):
+            rows.extend(_wrap_display(logical, maxw))
+        inner = min(maxw, max((_disp_width(r) for r in rows), default=0))
+        inner = max(inner, _disp_width("─ answer "))    # title must still fit
+
+        bar = f"{_BOLD}{_CYAN}"
+        head = "─ answer "
+        top = "╭" + head + "─" * (inner + 2 - _disp_width(head)) + "╮"
+        bot = "╰" + "─" * (inner + 2) + "╯"
+        _raw(f"{bar}{top}{_RST}\n")
+        for r in rows:
+            pad = " " * (inner - _disp_width(r))
+            _raw(f"{bar}│{_RST} {r}{pad} {bar}│{_RST}\n")
+        _raw(f"{bar}{bot}{_RST}\n")
+
         if _input_live:
             _draw_input()
         else:
@@ -310,8 +353,8 @@ def wire_for(tool: str, args: dict):
         if tool == "ps":    return "PS|"
         if tool == "help":  return "HELP|"
         if tool == "chat":  return f"CHAT|{_wire_escape(args.get('msg',''))}"
-        if tool == "read":  return f"READ|{args['file']}"
-        if tool == "write": return f"WRITE|{args['file']}:{_wire_escape(args.get('text',''))}"
+        if tool == "read":  return f"READ|{_wire_escape(args['file'])}"
+        if tool == "write": return f"WRITE|{_wire_escape(args['file'])}:{_wire_escape(args.get('text',''))}"
         if tool == "print": return f"PRINT|{_wire_escape(args.get('msg',''))}"
         if tool == "nice":  return f"NICE|{int(args['pid'])}:{int(args['priority'])}"
         if tool == "spawn":
