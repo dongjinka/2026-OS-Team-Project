@@ -315,8 +315,10 @@ def wire_for(tool: str, args: dict):
             argv = args.get("argv")
             if not isinstance(argv, list) or not argv:
                 argv = [bin_]
-            argv_str = " ".join(str(a) for a in argv)
-            return f"SPAWN|{bin_}|{argv_str}"
+            # Escape bin/argv too: an embedded newline would otherwise split the
+            # wire line and the tail would be mis-parsed as a bogus REQ.
+            argv_str = " ".join(_wire_escape(str(a)) for a in argv)
+            return f"SPAWN|{_wire_escape(bin_)}|{argv_str}"
     except (KeyError, ValueError, TypeError):
         return None
     return None
@@ -346,6 +348,12 @@ def clean_observation(text: str) -> str:
     out = []
     for ln in text.split("\n"):
         ln = ln.rstrip("\r")
+        # The kernel echoes only the bare "REQ|" prefix of a sent wire line
+        # (console.c suppresses the payload echo), leaving stray "REQ|" fragment
+        # lines in the captured buffer — drop them as echo noise so they never
+        # leak into the observation handed to the model.
+        if ln.startswith("REQ|"):
+            continue
         for p in ("[agentd] ", "[agent] "):
             if ln.startswith(p):
                 ln = ln[len(p):]
@@ -652,7 +660,7 @@ class Agent:
         # is exactly this tool's output.
         marker = f"__OBS{self._seq}__"
         self._seq += 1
-        marker_echo = "REQ|PRINT|" + marker        # xv6 echoes this back
+        marker_echo = "REQ|PRINT|" + marker        # marker request (only the bare "REQ|" is echoed back)
         marker_out = "[agentd] " + marker          # agentd prints this
 
         with self.cap_lock:

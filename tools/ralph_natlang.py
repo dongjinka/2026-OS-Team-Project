@@ -20,12 +20,16 @@ A FAIL on any scenario prints the relevant slice of agent.py stdout for
 diagnosis. Exit 0 only if every scenario passes.
 """
 import os, sys, socket, time, threading, subprocess, signal, shutil, re
+from pathlib import Path
 
 PORT = 6666
-FS_SRC  = "/root/OS_Project/xv6-riscv/fs.img"
+# Derive paths from the repo layout (this file is tools/ralph_natlang.py) so the
+# harness runs from any checkout, not just /root/OS_Project.
+ROOT = Path(__file__).resolve().parent.parent
+FS_SRC  = str(ROOT / "xv6-riscv" / "fs.img")
 FS_COPY = "/tmp/fs_ralph_natlang.img"
-KERNEL  = "/root/OS_Project/xv6-riscv/kernel/kernel"
-AGENT   = "/root/OS_Project/agent.py"
+KERNEL  = str(ROOT / "xv6-riscv" / "kernel" / "kernel")
+AGENT   = str(ROOT / "agent.py")
 
 QEMU_LOG  = "/tmp/qemu_natlang.log"
 AGENT_LOG = "/tmp/agent_natlang.log"

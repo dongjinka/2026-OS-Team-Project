@@ -126,6 +126,11 @@ sys_setpriority(void)
   // (negative) priority to anyone — that would be a privilege escalation.
   if(priority < 0 && myproc()->priority >= 0)
     return -1;
+  // F7: a sandboxed agent may renice ONLY itself (its F8 per-function priority
+  // retune); it must not renice peer user processes — that is a scheduling-level
+  // DoS from inside the jail (security audit #3).
+  if(myproc()->is_agent && pid != myproc()->pid)
+    return -1;
 
   // Snapshot the caller's class once, before taking any p->lock — so the
   // per-target check below never reads myproc()->priority while holding an
@@ -356,6 +361,12 @@ sys_dispatch(void)
   argaddr(0, &addr);
   char buf[MAX_DISPATCH_LEN];
   struct proc *p = myproc();
+  // A jailed agent must not inject wire commands directly — e.g. emit
+  // CONFIRM_RES to self-approve its own blocked exec/kill/mknod. The host
+  // drives dispatch over the serial console, never via this syscall. Mirrors
+  // the is_agent gate on sys_set_deny / sys_agent_recv.
+  if(p->is_agent)
+    return -1;
   if(copyinstr(p->pagetable, buf, addr, MAX_DISPATCH_LEN) < 0) return -1;
   agent_dispatch_now(buf);
   return 0;

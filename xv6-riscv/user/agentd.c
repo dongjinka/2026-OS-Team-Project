@@ -133,16 +133,21 @@ do_write(char *arg)
   char *data = c + 1;
   unescape_inplace(data);
 
-  int fd = open(arg, O_CREATE | O_RDWR);
+  // O_TRUNC so overwriting a longer existing file does not leave a stale tail.
+  int fd = open(arg, O_CREATE | O_TRUNC | O_RDWR);
   if(fd < 0){
     printf("[agentd] WRITE: '%s' not writable inside jail\n", arg);
     return;
   }
   int len = 0;
   while(data[len]) len++;
-  write(fd, data, len);
+  int wn = write(fd, data, len);
   close(fd);
-  printf("[agentd] WROTE %d bytes to %s\n", len, arg);
+  if(wn != len){
+    printf("[agentd] WRITE: short/failed write to %s (%d/%d bytes)\n", arg, wn, len);
+    return;
+  }
+  printf("[agentd] WROTE %d bytes to %s\n", wn, arg);
 }
 
 // LS — list the files in the sandbox directory, with sizes
