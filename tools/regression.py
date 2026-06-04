@@ -263,6 +263,11 @@ def build_tests(fast: bool) -> List[Test]:
     # 로 빨리 끝남. settle 값은 byte-race 로 마커가 깨졌을 때의 안전망이라
     # 충분히 크게 잡는다 (테스트의 *내부 silence* 최대치 + 여유).
     fair_settle = (fair_n * 0.12) + 8
+    # eval cache runs its N-key set/get DISK loops in silence (no per-key
+    # output), so the marker/settle fallback must cover that quiet window — else
+    # it fires mid-compute and the round-2 (warm) line is never captured. Scale
+    # with N like fair_settle does.
+    cache_settle = (cache_n * 0.2) + 10
 
     return [
         Test("priority_test", "priority_test",
@@ -275,8 +280,9 @@ def build_tests(fast: bool) -> List[Test]:
 
         Test("agentdemo", "agentdemo",
              "jail 진입, '..' 탈출 차단, 외부 파일 비가시, 음수 priority 거부, "
-             "exec 차단 — 4종 가드. exec 는 이제 confirm-escape 의 5s timeout 후 거부.",
-             judge_agentdemo, extract_agentdemo, timeout=40, settle=10.0),
+             "exec 차단 — 4종 가드. exec 는 confirm-escape 의 ~15s(150틱) timeout 후 거부되며, "
+             "그동안 게스트가 잠들어 무출력이므로 settle 을 그 침묵 구간보다 길게 둔다.",
+             judge_agentdemo, extract_agentdemo, timeout=45, settle=20.0),
 
         Test("write_race", "write_race",
              "4 writer 가 동일 파일에 동시 쓰기 — jail 안 inode sleeplock 직렬화 회귀.",
@@ -288,7 +294,7 @@ def build_tests(fast: bool) -> List[Test]:
 
         Test("eval cache", f"eval cache {cache_n}",
              "N 키 × 2 라운드 hit-rate — 1라운드 cold miss + 2라운드 warm 전부 hit 기대.",
-             judge_eval_cache, extract_eval_cache, timeout=60, settle=8.0),
+             judge_eval_cache, extract_eval_cache, timeout=120, settle=cache_settle),
 
         Test("eval semantic", f"eval semantic {semantic_n}",
              "MinHash+Jaccard: 정확/어순swap/무관 3종 키 — exact 100% + unrelated 오인 0% 검증.",

@@ -46,8 +46,12 @@ main(void)
   else
     printf("[demo] FAIL escape via '..' succeeded\n");
 
-  if(open("/cat", O_RDONLY) < 0)
-    printf("[demo] OK   outside file '/cat' is invisible\n");
+  // '/cat' is a poor probe: agentd's populate_jail() hard-links cat (and other
+  // tools) INTO /agentbox, so '/cat' legitimately resolves inside the jail.
+  // Probe '/init' — it lives at the real root, is never populated into the box,
+  // so after jail() it must be invisible.
+  if(open("/init", O_RDONLY) < 0)
+    printf("[demo] OK   outside file '/init' is invisible\n");
   else
     printf("[demo] FAIL outside file reachable\n");
 
