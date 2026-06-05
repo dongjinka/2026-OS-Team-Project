@@ -330,7 +330,7 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 ## 8. Cross-references
 
 - Architecture & OS concepts: [Technical_Report.md](Technical_Report.md)
-- Setup / run / demo: [../README.en.md](../README.en.md) (English) · [../README.md](../README.md) (Korean)
+- Setup / run / demo: [../README.md](../README.md) (English) · [../README.ko.md](../README.ko.md) (Korean)
 - Code-referenced detail: [../Implementation.md](../Implementation.md)
 - Feature status: [../plan.md](../plan.md) · Change log: [../CHANGELOG.md](../CHANGELOG.md)
 - Korean weekly status: [../Weekly_Development_Process.md](../Weekly_Development_Process.md) *(Week 9 → 14 진행 요약)*
