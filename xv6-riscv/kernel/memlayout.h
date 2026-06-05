@@ -45,7 +45,15 @@
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PGSIZE)
+// KSTACK_PAGES mapped stack pages + 1 guard page below each. Stock xv6 used a
+// single 4KB page; the agent command path (agent_drain_locked -> handle_*/
+// cache_set, ~1KB stack frames each, plus the FS/disk-write chain) overflows a
+// 4KB stack and a nested timer interrupt then faults in the guard page
+// (scause=0xf at kernelvec). The deepest path measured is the spawn -> exec
+// chain layered on the agent/cache/FS chain (~16KB used). 8 pages (32KB) gives
+// a 2x margin over that bounded peak.
+#define KSTACK_PAGES 8
+#define KSTACK(p) (TRAMPOLINE - ((p)+1)* (KSTACK_PAGES+1)*PGSIZE)
 
 // User memory layout.
 // Address zero first:
