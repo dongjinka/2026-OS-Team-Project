@@ -1,296 +1,386 @@
-# OS for LLM — xv6 위의 자율 에이전트 런타임
+# OS for LLM — an agent runtime on xv6-riscv
 
-**Direction A — OS for LLM.** xv6-riscv 위에 Upstage Solar(LLM)를 호스팅·지휘하는
-에이전트 런타임을 구현한 2026 운영체제 팀 프로젝트. AIOS 논문의 세 핵심
-컴포넌트(Agent Scheduler / Tool Manager / LLM Kernel Bridge)를 xv6 커널·사용자
-프로그램·호스트 브릿지에 직접 이식해, **사람의 셸 입력은 그대로 두면서 LLM이
-생성한 명령만 샌드박스 안에서 실행**한다. CFS 스케줄러·우선순위 시스템콜·chroot
-jail·격리 워커(`agentd`)·ReAct 에이전트 루프가 한 줄로 연결된다.
+**2026 Operating Systems · team term project · Direction A (OS for LLM).**
+Natural language is the keyboard; the kernel is the trust boundary.
 
-| AIOS 컴포넌트     | 이 프로젝트 구현                                                |
-| ----------------- | --------------------------------------------------------------- |
-| Agent Scheduler   | **CFS 스케줄러** — Linux `sched_prio_to_weight` 이식, vruntime  |
-| Tool Manager      | **agentd** + 커널 측 명령 큐 (`REQ\|CMD\|arg`) + 화이트리스트   |
-| LLM Kernel Bridge | **agent.py** — Solar API ↔ QEMU TCP 시리얼, ReAct 루프          |
+> 한국어 README: [README.ko.md](README.ko.md)
 
-> 자세한 진행 현황·설계 근거는 [plan.md](plan.md), 모듈별 구현 세부는
-> [Implementation.md](Implementation.md) 참조.
+We extend the **xv6-riscv** teaching kernel so it can **host, schedule, sandbox, and
+cache an LLM agent** (Upstage Solar). The three components of the *AIOS: LLM Agent
+Operating System* paper are implemented **inside a real kernel** rather than as a
+userspace wrapper:
 
----
+| AIOS component | Our implementation |
+| --- | --- |
+| **Agent Scheduler** | a **CFS scheduler** in the kernel using Linux's `sched_prio_to_weight` weights (vruntime, `cfs_min_vruntime`) |
+| **Tool Manager** | a **kernel command queue + jailed `agentd` worker** speaking a `REQ\|` wire protocol, with a configurable deny-list and an LLM-response cache |
+| **LLM–Kernel Bridge** | **`agent.py`** — a host-side ReAct loop bridging the Solar API ↔ the QEMU serial port |
 
-## 1. 핵심 기능
-
-| # | 기능 | 상태 |
-| - | ---- | ---- |
-| F1 | `setpriority` / `getpriority` 시스템 콜 (`priority_test` 통과) | ✅ |
-| F2 | user/kernel 우선순위 클래스 — 음수 priority = kernel-class (`init` = −5) | ✅ |
-| F3 | CFS 본체 — Linux 가중치 테이블 + vruntime + 배열 스캔(min-vruntime) | ✅ |
-| F4 | CFS 세부 — fork 상속, wakeup 보너스, 전역 `cfs_min_vruntime` | ✅ |
-| F5 | QEMU ↔ Upstage Solar Python 브릿지 (`.env` 자동 로드) | ✅ |
-| F6 | LLM 응답 JSON 역직렬화 (호스트 측 파싱) | ✅ |
-| F7 | 샌드박싱 — chroot jail + `exec`/`kill`/`mknod` **confirm-escape (호스트 y/N)** + 명령 화이트리스트 | ✅ (v2 sleep/wakeup + inline CONFIRM_RES) |
-| F8 | LLM이 다루는 도구별 priority 커스터마이즈 (`SETPRIO` / `LIST`) | ✅ |
-| 보너스 | ReAct 자율 에이전트 루프 + 대화 메모리 + **`spawn` 도구 verb** (자연어로 프로세스 생성 → confirm-escape) | ✅ |
-| F9 | LLM 응답 캐시 | ✅ (cache.c + 커널 `ASK` 오케스트레이션 + `agent.py :ask` 경로 — 히트 시 Solar 호출 생략. `_cache_lookup` ↔ `_cache_store` 정규화 동기화) |
-| F10 | 유휴 시간대 LoRA 학습 | ❌ (범위 외 — Future Work) |
+**The design invariant:** a human's shell input runs unrestricted, but *every command
+the LLM issues executes only inside a chroot jail with dangerous syscalls gated.* The
+privilege boundary between human and LLM is enforced by the **code path itself**, not by
+convention — which is what makes the OS concepts below load-bearing rather than
+decorative.
 
 ---
 
-## 2. 시스템 아키텍처
+## 1. Architecture
+
+A command the LLM produces reaches the CPU scheduler only after passing three kernel
+gates — **deny-list → jail → confirm-escape**. A human's shell command bypasses all of
+them. That asymmetry *is* the security model, and it is enforced by the code path below,
+not by convention.
 
 ```
- ┌───────────────────┐      자연어 입력
- │  사용자 (REPL)    │ ─────────────────►
- └─────────┬─────────┘
-           │
-           ▼
- ┌─────────────────────┐  HTTPS  ┌────────────────────────┐
- │  agent.py           │────────►│  Upstage Solar Pro     │
- │  (ReAct 루프 +      │◄────────│  (api.upstage.ai/v1)   │
- │   대화 메모리)       │  JSON   └────────────────────────┘
- │  • {tool,args} 파싱  │
- │  • REQ|CMD|arg 변환  │
- └─────────┬───────────┘
-           │ TCP 4444  (QEMU -serial tcp:)
-           ▼
- ┌──────────────────────────────────────────────────────────────┐
- │                       xv6 커널                                │
- │                                                              │
- │   사람 입력  ─► sh (셸)                                       │
- │                                                              │
- │   REQ| 라인 ─► consoleintr ─► agent_dispatch (인터럽트: intake 적재만)      │
- │                                  │                                          │
- │   agent_drain (프로세스 컨텍스트) ─► agent_dispatch_now: role 떼고 라우팅   │
- │     ├─ ASK ─► F9 캐시 조회                                                  │
- │     │         · 히트 → agentd로 응답 전달 (Solar 생략)                      │
- │     │         · 미스 → 호스트에 LLM_REQ ─► (Solar) ─► LLM_RESP ─► cache_set │
- │     └─ 그 외 ─► 거부 목록(KILL/EXEC) 검사 ─► agentq 적재                     │
- │                                   │ sys_agent_recv (is_agent only)          │
- │                                   ▼                                         │
- │   ┌──────────────────────────────────────────────────────┐   │
- │   │  agentd  (jailed: chroot=/agentbox, is_agent=1)       │   │
- │   │  도구(화이트리스트): PRINT · CHAT · READ · WRITE · LS │   │
- │   │    · NICE · LIST · SETPRIO · PS · HELP                │   │
- │   │  각 도구 실행 전 setpriority(self, fn.priority)       │   │
- │   └────────────────────┬─────────────────────────────────┘   │
- │                        ▼                                     │
- │   ┌──────────────────────────────────────────────────────┐   │
- │   │  CFS 스케줄러 — cfs_weight[41] · vruntime ·          │   │
- │   │  cfs_min_vruntime · fork 상속 · wakeup 보너스         │   │
- │   └──────────────────────────────────────────────────────┘   │
- └──────────────────────────────────────────────────────────────┘
+   Human · shell ───────────────────────────────────────────────────────►  CFS   (unrestricted)
+
+   User · natural language
+        │
+        ▼
+   agent.py  ◄──────HTTPS / JSON──────►  Upstage Solar Pro · api.upstage.ai/v1
+     host bridge — ReAct loop + conversation memory · parse Solar JSON → {tool, args}
+                   · encode one  REQ|CMD|arg  line per step
+        │
+        │  REQ| line  ·  TCP 4444  ·  QEMU serial
+        ▼
+   ── xv6 kernel · the trust boundary ─────────────────────────────────────────
+   consoleintr        detect the REQ| line; skip echoing its payload (no wire byte-race)
+        │
+        ▼
+   agent_dispatch     interrupt context — enqueue the line only (keeps the ISR short)
+        │
+        ▼
+   agent_drain        process context — strip the role tag, then route:
+        ├─ ASK  →  F9 cache (cache.c)
+        │            hit  → answer handed straight to agentd          (Solar NOT called)
+        │            miss → host LLM_REQ → Solar → LLM_RESP → cache_set, then answer
+        └─ cmd  →  deny-list  (default { KILL, EXEC }, configurable)  →  agentq
+                        │
+                        ▼   sys_agent_recv   (only is_agent processes may read the queue)
+   agentd · jailed worker     chroot = /agentbox,  is_agent = 1
+        · whitelisted tools:  PRINT · CHAT · READ · WRITE · LS · PS · NICE · SETPRIO · LIST · HELP · SPAWN
+        · before each tool:   setpriority(self, tool.priority)          (F8 per-tool tuning)
+        · exec / kill / mknod  →  confirm-escape v2  →  host y/N  (15 s timeout → deny)
+        │
+        ▼
+   CFS scheduler (proc.c)      cfs_weight[41] · vruntime · cfs_min_vruntime
+                               fork inheritance · wakeup bonus · leftmost-vruntime pick
 ```
+
+**The lifecycle of one natural-language turn**
+
+1. `agent.py` sends the prompt to Solar, receives JSON, and parses it into a `{tool, args}` step.
+2. It encodes the step as a single `REQ|CMD|arg` line and writes it to the QEMU serial port (TCP 4444).
+3. `consoleintr` spots the `REQ|` line and, in **interrupt context**, only *enqueues* it — `agent_dispatch` keeps the ISR short; it also wakes the console reader so the **next trap drains the queue** in process context.
+4. In **process context**, `agent_drain` strips the role tag and routes. An **`ASK`** is served from the F9 cache: a hit — exact, or a paraphrase matched by MinHash/Jaccard — returns the answer with **no Solar call**; a miss calls Solar once (`LLM_REQ → LLM_RESP`) and stores it (`cache_set`). A **tool command** is checked against the configurable **deny-list** (default `{ KILL, EXEC }`) and queued.
+5. Only a jailed **`agentd`** (`is_agent = 1`) may read the queue via `sys_agent_recv`, and it runs every tool inside its `/agentbox` **chroot jail**.
+6. Before each tool `agentd` calls `setpriority(self, tool.priority)` (F8). A tool needing **`exec`/`kill`/`mknod`** is suspended on a **confirm-escape**: it sleeps on a dedicated channel until the host answers `y/N` (a 15 s `clockintr`-driven timeout defaults to deny). That reply (`CONFIRM_RES`) is processed **inline in the interrupt**, bypassing the queue — necessary because the agent is asleep and no user trap would otherwise drain it.
+7. Every process — human and agent alike — is scheduled by **CFS** on its `vruntime`, so a process's priority maps to a measurable share of the CPU.
+
+The two-stage queue (steps 3–4) keeps interrupts short; the cache (4) means a repeated
+question never leaves the machine; the jail plus confirm-escape (5–6) is the privilege
+boundary; CFS (7) is where the scheduling concept becomes observable and measurable.
 
 ---
 
-## 3. 기술 스택
+## 2. OS concepts in play
 
-- **커널**: xv6-riscv (C, RISC-V 64), QEMU 7.2+
-- **사용자 프로그램**: `agentd` (격리 에이전트 런타임), `agentdemo`(F2·F7 데모),
-  `priority_test`(F1·F3 검증), `confirm_kill`/`confirm_mknod`(confirm-escape gate 검증)
-- **호스트 브릿지**: Python 3, [`openai`](https://pypi.org/project/openai/) SDK
-  (Solar API는 OpenAI 호환)
-- **LLM**: Upstage Solar Pro 2 (`UPSTAGE_MODEL=solar-pro2`)
-- **호스트–게스트 통신**: QEMU `-serial tcp:127.0.0.1:4444,server,nowait`
+This is a real operating-systems project: the LLM only makes the concepts below
+*visible*. Each is something we designed and implemented in the kernel.
 
----
+| OS concept | Where it lives |
+| --- | --- |
+| **Scheduling (CFS)** | `kernel/proc.c` (weights, vruntime, leftmost pick), `kernel/trap.c` (per-tick accrual) |
+| **Processes & priority** | `setpriority` / `getpriority`; user vs. kernel class; two-way escalation guard (`init` = −5) |
+| **System calls** | new `jail`, `agent_recv`, `set_deny`/`get_deny`, `procinfo`, `set_cache`/`get_cache`, `dispatch` |
+| **Protection / sandbox** | chroot jail in `namex()`; agent `exec`/`kill`/`mknod` go through **confirm-escape v2** (sleep on `&confirm_wait_chan`, woken by `clockintr` or host `CONFIRM_RES`); configurable deny-list (humans only) |
+| **Synchronization** | inode sleeplock (`write_race`), cache + deny-list spinlocks, log transactions (`begin_op`) for the cache disk overlay |
+| **Concurrency / IPC** | `agentcmd.c` 2-stage queue (ISR enqueue → process-context drain); `agent_multi` runs 4 concurrent agents |
+| **File system** | jailed file tools in `/agentbox`; `/cache.bin` cache overlay; `/denylist.conf` persistence |
 
-## 4. 디렉터리 구조
-
-```
-OS_Project_main/
-├── README.md                  # (이 문서)
-├── Implementation.md          # 모듈별 상세 구현
-├── plan.md                    # 진행 현황·평가 지표·남은 작업
-├── Project_requirements.md    # 과제 요구사항 원문
-├── agent.py                   # 호스트 측 LLM 에이전트 루프
-├── .env.example               # API 키 템플릿 (.env 는 .gitignore 처리)
-└── xv6-riscv/
-    ├── Makefile               # qemu / qemu-agent 타깃
-    ├── kernel/
-    │   ├── proc.{c,h}         # CFS · 우선순위 · is_agent / jail_root
-    │   ├── trap.c             # 타이머 vruntime 가산 (cfs_vdelta)
-    │   ├── fs.c               # namex() chroot jail
-    │   ├── syscall.{c,h}      # SYS_jail · SYS_agent_recv · agent 차단
-    │   ├── sysfile.c          # sys_jail()
-    │   ├── sysproc.c          # sys_setpriority 음수 가드, sys_agent_recv
-    │   ├── agentcmd.c         # 명령 큐 + 거부 목록 게이트 + inline CONFIRM_RES
-    │   ├── cache.c            # F9 LLM 응답 캐시 (16-슬롯 RAM + /cache.bin)
-    │   ├── confirm.c          # confirm-escape v2 (sleep/wakeup 기반)
-    │   └── console.c          # REQ| 라인 감지 훅 + payload echo skip (race 차단)
-    ├── user/
-    │   ├── agentd.c           # ★ 격리 에이전트 런타임 (jail + 도구 테이블 + populate_jail + do_spawn)
-    │   ├── agentdemo.c        # ★ F2·F7 데모 (fork+exec 패턴 — confirm-escape allow/deny 양쪽 verify)
-    │   ├── confirm_kill.c     # confirm-escape SYS_kill 게이트 직접 호출
-    │   ├── confirm_mknod.c    # confirm-escape SYS_mknod 게이트 직접 호출
-    │   ├── priority_test.c    # F1·F3 단위 테스트
-    │   ├── init.c             # 부팅 시 agentd 자동 기동
-    │   └── usys.pl, user.h    # jail/agent_recv 스텁
-    └── mkfs/mkfs.c            # 디스크 이미지 빌더
-tools/
-├── regression.sh / regression.py   # 9-시나리오 회귀 (수동 셸 명령 자동화)
-├── ralph_battery.py                # 26-시나리오 셸/syscall 자동 회귀 (포트 5555)
-└── ralph_natlang.py                # 39-시나리오 자연어 회귀 (mock 모드, 포트 6666)
-```
+Full rationale and block diagram: [docs/Technical_Report.md](docs/Technical_Report.md).
+No floating point and no dynamic allocation are used in any kernel-side addition — both
+are restricted in xv6.
 
 ---
 
-## 5. Setup
+## 3. Quick start
 
-### 5.1 사전 의존성 (Ubuntu / WSL2 기준)
+### 3.1 Dependencies
 
 ```bash
+# Debian / Ubuntu / WSL2
 sudo apt install qemu-system-misc gcc-riscv64-linux-gnu python3-pip make
-pip install openai
+pip3 install openai
+
+# macOS
+brew install qemu riscv-software-src/riscv/riscv-tools
+pip3 install openai
 ```
 
-### 5.2 저장소 클론
+`openai` is only needed for live LLM mode; without it the bridge falls back to a
+rule-based **mock** so the kernel path can still be exercised.
+
+### 3.2 Solar API key — never commit it
+
+The Upstage Solar key is supplied by the instructor (per team). `.env` is gitignored;
+`.env.example` is the committed template.
 
 ```bash
-git clone <팀-저장소-URL> OS_Project_main
-cd OS_Project_main
+cp .env.example .env
+# then edit .env:
+#   UPSTAGE_API_KEY=up_xxxxxxxxxxxxxxxxxxxx
+#   UPSTAGE_MODEL=solar-pro2
 ```
 
-### 5.3 Upstage Solar API 키
+API docs: <https://console.upstage.ai/docs>. (The assignment §4 names *Solar Pro 3*; we
+default to `solar-pro2` for availability — change `UPSTAGE_MODEL` to switch.)
 
-1. [console.upstage.ai/docs](https://console.upstage.ai/docs) 에서 API 키 발급
-   (강의에서 팀별로 배포된 키가 있으면 그것을 사용).
-2. 템플릿을 복사해 `.env` 생성:
+---
 
-   ```bash
-   cp .env.example .env
-   # 편집기로 .env 를 열어 UPSTAGE_API_KEY=up_xxxxxxxx 채우기
-   ```
+## 4. How to run
 
-3. **`.env` 는 절대 커밋하지 않는다.** `.gitignore` 에 이미 차단되어 있으나
-   확인 권장. `agent.py` 가 스크립트 옆 `.env` 를 자동 로드한다 (실제
-   환경변수가 있으면 그쪽이 우선).
+Two modes: a plain **shell** (run kernel tests directly) and **agent mode** (the kernel
+listens on a TCP serial port for the Python bridge).
 
-키가 비어 있어도 `agent.py` 는 **mock 모드**(룰 기반 더미)로 실행되어 커널
-경로만 점검할 수 있다.
-
-### 5.4 커널 빌드
+### 4.1 Shell mode — run the OS tests
 
 ```bash
 cd xv6-riscv
 make clean
-make qemu-agent   # 4444 포트에서 시리얼 수신 대기
+make qemu                  # boots xv6 to an interactive shell
+
+# at the xv6 '$' prompt:
+$ priority_test            # F1/F3/F4 — priority syscalls + scheduler
+$ agentdemo                # F2/F7 — jail isolation + privilege guards + blocked syscalls
+$ cache_test               # F9 — cache RAM-hit / evict / disk-promote (13/13)
+$ eval cache 50            # F9 — round-1 miss vs round-2 hit rate
+$ eval acl 1               # F7 — per-role ACL deny rate
+$ eval fair 30000000       # F3/F4 — prio=0 vs prio=19 completion time
+$ agent_multi              # concurrency — 4 role-based agents interleaved by CFS
+$ write_race               # synchronization — inode sleeplock serializes writers
+$ denyctl list             # F7 — show the effective kernel deny-list
 ```
 
-`make qemu-agent` 는 QEMU 콘솔을 TCP 4444 로 노출한다. 일반 셸 상호작용이 필요할
-때는 대신 `make qemu` 사용.
-
----
-
-## 6. 실행 방법
-
-### 6.1 LLM 에이전트 모드
-
-터미널 두 개를 띄운다.
-
-**터미널 1 — xv6 부팅**
+For the fairness benchmark, a single core makes time-sharing clearest:
 
 ```bash
-cd xv6-riscv
-make qemu-agent
+make clean && make qemu CPUS=1
+$ cfs_bench                # per-priority CPU-share table (numbers in docs/BENCHMARKS.md)
 ```
 
-**터미널 2 — 에이전트 브릿지**
+Quit QEMU with `Ctrl-a x`.
+
+### 4.2 Agent mode — talk to the LLM
+
+Open two terminals.
 
 ```bash
+# Terminal 1 — boot xv6 with its serial port on TCP 127.0.0.1:4444 (smp=1)
+cd xv6-riscv && make qemu-agent
+```
+
+```bash
+# Terminal 2 — start the host bridge (from the repo root)
 python3 agent.py
 ```
 
-기동 시 `[agent] mode = solar (solar-pro2)` 또는 `[agent] mode = mock` 로
-모드를 알린다. `you ▸` 프롬프트에 자연어로 요청하면 LLM이 ReAct 루프로
-계획·도구 호출·관찰을 반복한 뒤 답한다. 한 줄을 `:ask <프롬프트>`로 보내면
-대신 **커널 F9 캐시 경로**를 타며(히트 시 Solar 호출 생략), `:role <name>`으로
-요청에 역할 태그를 붙일 수 있다.
+The bridge prints `mode: solar (solar-pro2)` (key present) or `mode: mock` and drops into
+a REPL. Ask in plain language — it plans, runs sandbox tools, observes their output, and
+remembers the conversation.
 
-실증된 시나리오 예:
+| Input | Behavior |
+| --- | --- |
+| `<natural-language request>` | ReAct loop — call tools / observe, then answer |
+| `:ask <prompt>` | kernel F9 cache path — skips the Solar call on a hit |
+| `:role <name>` | tag following requests with a role |
 
-```
-you ▸ /agentbox 안에 plan.txt 라는 파일을 하나 만들어줘
-you ▸ 지금까지 만든 파일들 목록 보여줘
-you ▸ 그 파일들 내용을 요약해줘
-you ▸ 아까 CFS 얘기 나왔던 파일이 뭐였지?      # ← 대화 메모리에서 답변
-you ▸ :ask 오늘 날씨 어때?                      # ← 커널 캐시 경유 (재요청 시 [cache HIT])
-you ▸ echo 안녕 출력하는 프로세스 만들어줘      # ← spawn → confirm-escape →
-                                                #    [jail] pid=X — 15초 내 허용? (y/N)
-you ▸ 22 + 45는?                                # ← 동일 prompt 재호출 시 [cache HIT]
-```
-
-종료는 `Ctrl-D` 또는 `Ctrl-C`. xv6 측은 `make qemu-agent` 터미널에서
-`Ctrl-A X` 로 빠져나간다.
-
-### 6.2 셸 단독 모드 (CFS / 샌드박스 데모)
-
-```bash
-cd xv6-riscv
-make qemu
-```
-
-xv6 셸에서:
-
-```
-$ priority_test        # F1·F3·F4 우선순위/CFS 검증
-$ agentdemo            # F2·F7 샌드박스 데모 (jail 진입 후 차단 시나리오)
-```
-
-`priority_test` 는 Test 1·2·3 모두 PASSED 가 떠야 한다. `agentdemo` 는 jail 내
-read/write 성공 후 `..`·외부 경로·음수 priority·`exec`·`kill` 차단을 차례로 검증.
+On boot, `init` automatically launches `agentd`, which jails itself into `/agentbox` and
+applies the persisted deny-list. Every tool the LLM calls executes inside that jail.
 
 ---
 
-## 7. 검증 / 평가
+## 5. Demo
 
-| 검증 항목 | 결과 |
-| --------- | ---- |
-| 커널·`fs.img` 빌드, smp=1·smp=3 QEMU 부팅 | ✅ panic 없음 |
-| `priority_test` Test 1/2/3 | ✅ 모두 PASSED |
-| `agentdemo` 체크 5개 (jail read/write, `..` 차단, 음수 priority 거부, exec confirm-escape allow/deny) | ✅ 모두 통과 |
-| `REQ\|PRINT\|...`, `REQ\|NICE\|2:5`, `REQ\|SPAWN\|/echo\|...`, `REQ\|FOO\|bar`(unknown) | ✅ 기대 동작 |
-| 실제 Solar API 멀티스텝 에이전트 시나리오 (write → ls → read × N → 요약 → 대화 메모리 활용) | ✅ 통과 |
-| **`tools/ralph_battery.py`** — 26 셸/syscall 시나리오 자동 회귀 (포트 5555, ~3 min) | ✅ 26/26 PASS |
-| **`tools/ralph_natlang.py`** — 39 자연어 시나리오 자동 회귀 (mock 모드, 포트 6666, ~50 s) | ✅ 39/39 PASS |
+Every transcript below is **real run output** (`solar-pro2`, smp=1).
 
-총 자동 회귀 **65/65 GREEN**. 두 회귀는 격리 포트 + 자체 `fs.img` 복사본을
-써서 4444 사용자 세션과 *동시 실행 OK*.
+### 5.1 Repeated question → kernel cache hit
 
-세부 평가 지표·진단 history·시나리오 카탈로그는 [Project_Guide.md §11](Project_Guide.md) 참조.
+Ask the same question twice; the second answer comes from the kernel F9 cache and Solar is
+never called.
+
+```text
+you ▸ In one short sentence, what is a system call?
+   💭 The user is asking for a concise definition of a system call.
+╭─ answer ─────────────────────────────────────────────────────────────────────╮
+│ A system call is an interface between a program and the operating system for │
+│ requesting services.                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+you ▸ In one short sentence, what is a system call?          ← same request again
+[cache HIT] answer reused from kernel F9 cache (Solar not called)
+╭─ answer ─────────────────────────────────────────────────────────────────────╮
+│ A system call is an interface between a program and the operating system for │
+│ requesting services.                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+### 5.2 Sandbox — confirm-escape gate and jail denials
+
+Spawning a process asks the host `y/N`; reading outside the jail or renicing another
+process is refused by the kernel.
+
+```text
+you ▸ spawn a process that prints hello
+   ▶ step 1 · ls                                    (agentd confirms /echo exists in the jail)
+   ▶ step 2 · spawn  bin=/echo  argv=['echo', 'hello']
+[jail] pid=5 requests dangerous syscall 'exec' — allow within 15s? (y/N)  y    ← host approves (the gate prompt matches the question's language)
+   xv6 ┃ echo hello
+   xv6 ┃ [agentd] SPAWN /echo done (status=0)
+
+you ▸ read the contents of /etc/passwd
+   ▶ step 1 · read  file=/etc/passwd
+   xv6 ┃ [agentd] READ: '/etc/passwd' not reachable inside jail      ← denied outside the jail
+
+you ▸ lower the priority of process 1 to 19
+   ▶ step 1 · ps
+   ▶ step 2 · nice  pid=1  priority=19
+   xv6 ┃ [agentd] NICE: denied (pid=1 prio=19)                       ← a jailed agent cannot renice others
+```
+
+### 5.3 Screenshots / GIF — *to be added*
+
+Capture the runs above and drop the files in [`docs/assets/`](docs/assets/); then the
+links below will render. A recording recipe (asciinema + agg) is in
+[`docs/assets/README.md`](docs/assets/README.md).
+
+| What to capture | Command | Placeholder |
+| --- | --- | --- |
+| Agent REPL multi-step task | `make qemu-agent` + `python3 agent.py` | `![agent demo](docs/assets/agent-demo.gif)` |
+| F9 cache hit on a repeated question | agent mode, repeat the same question | `![cache hit](docs/assets/cache-hit.png)` |
+| `priority_test` all PASSED | `make qemu` → `priority_test` | `![priority test](docs/assets/priority-test.png)` |
+| `cfs_bench` CPU-share table | `make qemu CPUS=1` → `cfs_bench` | `![cfs bench](docs/assets/cfs-bench.png)` |
 
 ---
 
-## 8. 알려진 한계 / Future Work
+## 6. Verification at a glance
 
-- **F6 JSON 파싱 위치** — 현재는 호스트(`agent.py`)에서 파싱한다. 제안서
-  원문은 "xv6 내부 구현"을 명시하므로 보고서에 설계 근거를 명시하거나
-  `kernel/json.c` 미니 파서로 이식하는 옵션이 남아 있다 ([plan.md §5.1](plan.md)).
-- **F9 LLM 응답 캐시 — 구현·연결 완료** (한계 아님, 기록용). `kernel/cache.c`
-  (16-슬롯 RAM + `/cache.bin` 디스크 오버레이 + MinHash/Jaccard 의미 매칭, Se-Joong
-  원작 `c56b028`을 `76b2737`에서 이식) 위에, 커널 명령 경로의 `ASK` 메타 명령이
-  캐시를 조회한다: 히트면 `LLM_RESP` 없이 곧장 agentd로 응답을 전달하고, 미스면
-  호스트에 `LLM_REQ`를 보내 Solar를 1회 호출한 뒤 응답을 캐시에 적재한다. 호스트는
-  `agent.py`의 `:ask <프롬프트>`로 이 경로를 쓴다(기존 ReAct 루프는 기본 유지).
-  남은 여지: `:ask`를 기본 입력으로 승격할지(설계 선택, [plan.md §5.2](plan.md)).
-- **F10 유휴 시간대 LoRA 학습** — xv6(RISC-V, FP·디스크·메모리 극히 제한)에서
-  실제 학습은 불가. 보고서 Future Work 로 분류, 필요 시 "유휴 tick 감지 →
-  호스트 트리거 신호" 수준의 stub 가능.
+| Check | Result |
+| --- | --- |
+| Kernel boot (smp=1 and smp=3) | no panic |
+| `priority_test` Test 1 / 2 / 3 | PASSED |
+| `agentdemo` 5 checks (jail read/write, `..` blocked, negative-priority denied, exec confirm allow/deny) | all pass |
+| `cache_test` | 13/13 (RAM hit / evict / disk promote) |
+| `denyctl add WRITE` → `REQ\|WRITE\|` | blocked in kernel (never reaches `agentd`) |
+| `denyctl save` → reboot → `list` | `/denylist.conf` auto-loaded, entries survive |
+| Jail escape via `..` / outside paths | denied |
+| Agent `exec` / `kill` / `mknod` | host `y/N` gate (timeout = default deny) |
+| User → negative-priority escalation / kernel-class demotion | denied |
+| `REQ\|SPAWN\|/echo\|...` | fork+exec inside jail, confirm-escape on exec |
+| F9 `:ask` repeated | MISS then HIT (Solar skipped on hit) |
+| **`tools/ralph_battery.py`** — 26 shell/syscall scenarios (port 5555) | 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 natural-language scenarios (mock, port 6666) | 39/39 PASS |
+| Live Solar ReAct multi-step + memory | ls → read (×N) → summary; the follow-up uses prior context |
+
+Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions across 16 + 17
+scenarios; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
+isolated ports + per-run `fs.img` copies, so they run alongside a live 4444 session.
+Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md).
 
 ---
 
-## 9. 라이선스 / 출처
+## 7. Feature status
 
-- xv6-riscv 원본은 MIT 라이선스 ([xv6-riscv/LICENSE](xv6-riscv/LICENSE)).
-- 본 프로젝트의 자체 변경분도 동일하게 MIT 로 공개.
-- 설계 모티프: Kai Mei et al., *AIOS: LLM Agent Operating System*, 2024.
+| # | Feature | Status |
+| --- | --- | --- |
+| F1 | `setpriority` / `getpriority` syscalls | done |
+| F2 | user/kernel priority classes (negative = kernel; `init` = −5); two-way escalation guard | done |
+| F3 | CFS scheduler — Linux weight table + vruntime + array scan | done |
+| F4 | CFS details — fork inheritance, wakeup bonus, global `cfs_min_vruntime` | done |
+| F5 | QEMU ↔ Upstage Solar Python bridge (`.env` auto-load) | done |
+| F6 | LLM-response JSON deserialization (host-side parsing — rationale in report) | done |
+| F7 | Sandboxing — chroot jail + confirm-escape (`y/N`) + tool whitelist + configurable deny-list | done (v2 sleep/wakeup) |
+| F8 | per-tool priority customization (`SETPRIO` / `LIST`) | done |
+| Bonus | ReAct autonomous loop + conversation memory + `spawn` tool (NL → process → confirm-escape) | done |
+| F9 | LLM-response cache — RAM + `/cache.bin` disk overlay + MinHash/Jaccard + kernel `ASK` orchestration | done |
+| F10 | idle-time LoRA training | out of scope (Future Work) |
 
 ---
 
-## 10. 참조 문서
+## 8. Repository layout
 
-- [Project_Guide.md](Project_Guide.md) — **종합 가이드** (§1-§10 기초 개념, §11 회귀/디버깅 history, §12 자연어 사용 가이드, §11.15 cache miss fix 진단)
-- [Implementation.md](Implementation.md) — 모듈별 구현 상세, 코드 인용, 와이어 프로토콜
-- [plan.md](plan.md) — 요구사항 매핑, 진행 현황, 평가 지표, 남은 작업
-- [Project_requirements.md](Project_requirements.md) — 과제 요구사항 원문
-- [Weekly_Development_Process.md](Weekly_Development_Process.md) — 주차별 개발 과정
+```
+.
+├── README.md / README.ko.md   entry (EN / KR)
+├── agent.py                   host-side ReAct bridge; :ask = F9 cache path
+├── .env.example               copy to .env, add the Solar key (gitignored)
+├── docs/                      reports, security/eval, benchmarks, media  (→ docs/README.md)
+├── tools/                     regression harnesses · red-team · bench scripts
+└── xv6-riscv/
+    ├── kernel/
+    │   ├── proc.{c,h}         CFS weights, vruntime, is_agent / jail_root
+    │   ├── agentcmd.c         2-stage dispatch, deny-list, ASK/cache meta-commands
+    │   ├── cache.c            F9 response cache (RAM + /cache.bin + MinHash/Jaccard)
+    │   ├── confirm.c          confirm-escape v2 (sleep/wakeup, clockintr timeout)
+    │   ├── fs.c / sysfile.c   chroot jail (namex), jail() syscall
+    │   └── sysproc.c          priority guard; agent_recv / cache / dispatch syscalls
+    └── user/
+        ├── agentd.c           jailed agent worker — tool table + per-fn priority + spawn
+        ├── priority_test.c · cfs_bench.c · cache_test.c · eval.c   tests / benchmarks
+        └── agent_multi.c · write_race.c                            concurrency / sync demos
+```
+
+Deep, code-referenced detail: [Implementation.md](Implementation.md).
+
+---
+
+## 9. Limitations & future work
+
+- **F6 (JSON deserialization)** runs on the host (`agent.py`); the kernel only accepts a
+  validated minimal `REQ|<CMD>|<arg>` format. Rationale (kernel safety, no float/heap in
+  xv6, layer separation) is in the report — a deliberate departure from the proposal wording.
+- **Security follow-up** — red-team findings #1·#3·#4 are fixed; **#2** (cache `/cache.bin`
+  resolving through the jail) and **#5** (deny-list default not covering `SPAWN`) are open.
+  See [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md) and the full audit
+  [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+- **SMP** — `make qemu-agent` runs single-core to avoid a known kernelvec trap-entry race
+  (`scause=0xf`); shell mode (`make qemu`) boots with smp>1.
+- **Solar tokenizer boundary** — a Korean particle abutting a number (e.g. `"22 + 45는?"`)
+  can drop a token; the wire path is byte-perfect, so the workaround is to insert a space or drop the quotes.
+- **F10 (idle-time LoRA training)** is infeasible on xv6 (RISC-V, no float, tiny memory/disk).
+
+---
+
+## 10. Deliverables & documents
+
+| # | Deliverable | Location |
+| --- | --- | --- |
+| 1 | **Application** + source + how-to-run | this README + [README.ko.md](README.ko.md) + repository |
+| 2 | **Technical Report** | [docs/Technical_Report.md](docs/Technical_Report.md) |
+| 3 | **Development Process** | [docs/Development_Process.md](docs/Development_Process.md) |
+| 4 | **Presentation Slides** (English) | `slides/` *(to be added)* |
+
+Full documentation map: [docs/README.md](docs/README.md) — routes to the reports, the
+security audit, the benchmarks, and the Korean reference docs (Implementation · Project_Guide ·
+CHANGELOG).
+
+---
+
+## 11. Team
+
+| Member | Focus (from git history) |
+| --- | --- |
+| Se-Joong Kim | xv6 integration, scheduler foundation, jail/sandbox rewrite, F9 cache, regression harness |
+| SeungBeom Kim | core features: CFS, sandboxing, `agentd`, `agent.py` loop, security guards, PS/HELP |
+| June Kong | evaluation automation (`cfs_share`, Test 3), documentation, design decisions |
+| Dongjin Ka | repository / review |
+
+> Roles are inferred from git history — correct if inaccurate.
+
+---
+
+## 12. License & credits
+
+- xv6-riscv is MIT-licensed (`xv6-riscv/LICENSE`); our changes are released under the same license.
+- Design motif: Kai Mei et al., *AIOS: LLM Agent Operating System*, 2024.
+</content>
