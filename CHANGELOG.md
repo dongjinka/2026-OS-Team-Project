@@ -14,7 +14,59 @@
 
 ## [Unreleased]
 
-(작업 중인 변경은 여기 누적)
+### Added (2026-06-08 — June)
+- **데모 캡처 8장** `docs/assets/`에 추가 — 모두 `solar-pro2` 라이브
+  agent-mode 세션 실제 출력:
+  - `cache-hit.png` — 동일 산수 질문 2회, 2번째에 `[cache HIT] Solar not called`
+    (F9 캐시 hit, [Technical Report §5.4](docs/Technical_Report.md))
+  - `confirm-escape-allow.png` — *"make a process that runs echo hello"* → `y`
+    → `SPAWN /echo done (status=0)` (confirm-escape v2 + `spawn`, allow path)
+  - `confirm-escape-deny.png` — 같은 요청에 `N` → `denied (confirm-escape)`
+    (confirm-escape v2, deny path)
+  - `nice-init-denied.png` — *"change init priority to 5"* →
+    `[agentd] NICE: denied (pid=1 prio=5)` (F2 kernel-class 보호, init = −5)
+  - `jail-populate.png` — *"list files in /agentbox"* → `populate_jail()`이
+    부팅 시 hard-link한 `echo`/`cat`/`ls`/`grep`/`sh`/... 보임
+  - `agent-write.png` — *"write 'TODO 1\nTODO 2' into /plan.txt"* →
+    `[agentd] WROTE 13 bytes` (WRITE + wire newline escape)
+  - `agent-read-memory.png` — *"re-read the file you just created and summarize it"*
+    → READ + `agent.py self.messages` 대화 메모리로 어떤 파일인지 인식
+  - `agent-ps.png` — *"show me the currently running processes"* → PS 출력에
+    `init [K] -5 / agentd [A] 8 / sh 10` (자기관찰 + `[K]`/`[A]` 클래스 마커)
+
+### Changed (2026-06-08 — June)
+- **README.md** — §5.1 끝에 `cache-hit.png` 인라인; §5.2에 confirm-escape
+  allow/deny 페어와 `nice-init-denied.png` 인라인; §5.3 placeholder 테이블을
+  실제 4컷 갤러리(jail-populate · agent-ps · agent-write · agent-read-memory)로
+  교체.
+- **README.ko.md** — 영문 README와 동일 위치에 한글 캡션으로 미러.
+- **docs/Technical_Report.md** — §4.4 끝(jail/F7 설명)에 `nice-init-denied.png`,
+  §6.2 끝(agentd tool table + AI self-observation)에 `agent-ps.png`,
+  §6.6 끝(`spawn` + `populate_jail`)에 `confirm-escape-allow.png` ×
+  `jail-populate.png` 페어 인라인.
+- **docs/Development_Process.md** — §3 Week 14 행과 §7 "Remaining before the
+  final presentation" 항목을 갱신 — "데모 캡처: PNG 8장 done 2026-06-08, GIF
+  pending".
+- **Weekly_Development_Process.md** — Week 14 단락 끝에 06-04 보안 감사 +
+  06-08 데모 캡처 8장 추가 사실을 명시(영문 `docs/Development_Process.md`
+  Week 14 행과 일관).
+- **docs/assets/README.md** — 인덱스를 1줄 placeholder 표에서 캡처 8장의
+  파일명·시연·매핑된 보고서 섹션을 모두 적은 표로 교체. 본문 첫 줄에서
+  "데모 자리표시가 가리키는 폴더" 문구를 "**8장이 들어 있고** asciinema GIF /
+  `priority_test` / `cfs_bench` 화면이 아직 안 들어왔다"로 정리(미완성 인상 제거).
+- **docs/README.md** — 라우팅 인덱스의 "Security & Evaluation" 표에 "Demo
+  media" 행 추가 — `docs/` 하위 산출물 인덱스가 `assets/`를 안 가리키던 누락
+  보완.
+- **README.md §5.3 / README.ko.md §5.3 캡션** — "All eight ... captured 2026-06-08"
+  /  "스크린샷 8장 모두 ... 캡처" 문구를 §5.2와 §5.1에 이미 인라인된 4장 +
+  §5.3의 4장으로 구체화. 추가 자리표시(`agent-demo.gif` 등)도 "아직 안 들어온
+  후보"임을 명시해 미완성 인상 제거.
+
+### Removed (2026-06-08 — June)
+- **README.md / README.ko.md 마지막 줄의 `</content>` 잔재** — 이전 세션의
+  Read tool 출력 닫힘 태그가 파일에 섞여 커밋된 흔적. Markdown 렌더에는 보이지
+  않지만 raw view에서 미완성 인상을 줘서 제거. 두 파일 모두 마지막 의미 줄
+  ("- Design motif: ...") 직후로 자연 종료.
 
 ---
 

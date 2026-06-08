@@ -1,14 +1,30 @@
 # 데모 미디어 (assets)
 
-루트 [`README.md`](../../README.md) §5.3 / [`README.ko.md`](../../README.ko.md) §5.3의
-데모 자리표시가 가리키는 폴더다. 아래 파일명으로 캡처/GIF를 넣으면 README 링크가 렌더된다.
+루트 [`README.md`](../../README.md) §5 / [`README.ko.md`](../../README.ko.md) §5에서
+인라인하는 데모 캡처 폴더다. **2026-06-08 캡처 8장이 들어 있고**, 모두
+`mode: solar (solar-pro2)`, smp=1, agent mode 실제 세션 출력이다. asciinema
+GIF·`priority_test` 화면·`cfs_bench` 화면은 아직 안 들어왔다(아래 "추가 후보").
 
-| 파일 | 무엇을 담나 | 어떻게 |
+## 인덱스 (2026-06-08)
+
+| 파일 | 무엇을 담나 | 매핑된 기능 |
 | --- | --- | --- |
-| `agent-demo.gif` | 에이전트 REPL 멀티스텝 (계획 → 도구 → 관찰 → 답변) | `make qemu-agent` + `python3 agent.py` 세션 녹화 |
-| `cache-hit.png` | 같은 질문 반복 시 `[cache HIT]` | 에이전트 모드에서 동일 질문 2회 |
-| `priority-test.png` | `priority_test` 전부 PASSED | `make qemu` → `priority_test` |
-| `cfs-bench.png` | `cfs_bench` 우선순위별 CPU 점유 표 | `make qemu CPUS=1` → `cfs_bench` |
+| `cache-hit.png` | 같은 산수 질문 2회 — 2번째에 `[cache HIT] Solar not called` | F9 캐시 hit ([Technical Report §5.4](../Technical_Report.md#54-f9--the-response-cache-implemented-on-main)) |
+| `confirm-escape-allow.png` | "make a process that runs echo 'hello'" → `y` → `SPAWN /echo done (status=0)` | confirm-escape v2 + `spawn` allow ([§6.6](../Technical_Report.md#66-the-spawn-tool-verb-do_spawn--populate_jail)) |
+| `confirm-escape-deny.png` | 같은 요청 → `N` → `denied (confirm-escape)` | confirm-escape v2 deny path ([§4.4](../Technical_Report.md#44-protection--isolation--a-chroot-jail--configurable-deny-list-f7)) |
+| `nice-init-denied.png` | "change init priority to 5" → `[agentd] NICE: denied (pid=1 prio=5)` | F2 kernel-class 보호 ([§4.2](../Technical_Report.md#42-processes--priority-classes-f1f2)) |
+| `jail-populate.png` | "list files in /agentbox" → `echo`/`cat`/`ls`/`grep`/`sh`/... | `populate_jail()` hard-link ([§6.6](../Technical_Report.md#66-the-spawn-tool-verb-do_spawn--populate_jail)) |
+| `agent-write.png` | "write 'TODO 1\nTODO 2' into /plan.txt" → `WROTE 13 bytes` | WRITE 도구 + wire newline escape ([§5.2](../Technical_Report.md#52-wire-protocol--observation-capture)) |
+| `agent-read-memory.png` | "re-read the file you just created and summarize it" → READ + 대화 메모리 | READ 도구 + `agent.py` conversation memory ([§5.3](../Technical_Report.md#53-conversation-memory)) |
+| `agent-ps.png` | "show me the currently running processes" → `init [K] -5 / agentd [A] 8 / sh 10` | PS 자기관찰 + `[K]`/`[A]` 클래스 마커 ([§6.2](../Technical_Report.md#62-the-agentd-tool-table-whitelist--per-function-priority-f7f8)) |
+
+## 추가 후보 (아직 없음)
+
+| 파일 | 어떻게 |
+| --- | --- |
+| `agent-demo.gif` | `make qemu-agent` + `python3 agent.py` 세션 녹화 (asciinema) |
+| `priority-test.png` | `make qemu` → `priority_test` |
+| `cfs-bench.png` | `make qemu CPUS=1` → `cfs_bench` |
 
 ## 녹화 → GIF
 
@@ -22,4 +38,3 @@ agg demo.cast docs/assets/agent-demo.gif --cols 90 --rows 22
 **화면 녹화:** Peek(Linux) / ScreenToGif(Windows)로 터미널 영역만 캡처 → GIF/PNG 저장.
 
 GIF는 가급적 **폭 ~760px, 10초 내외, 수 MB 이하**로 유지한다.
-</content>

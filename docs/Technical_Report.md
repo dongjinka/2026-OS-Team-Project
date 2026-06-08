@@ -208,6 +208,8 @@ argument-fetch + dispatch path.
 - **Opt-in** — only a process that called `jail()` (and its children) is
   affected; ordinary shells and commands are untouched.
 
+![Jailed agent asked to renice pid 1 to 5 → `[agentd] NICE: denied (pid=1 prio=5)` — `init` is kernel-class (priority −5) and the user-class guard refuses the demote.](../docs/assets/nice-init-denied.png)
+
 ### 4.5 Synchronization *(new on main)*
 
 **Concept:** mutual exclusion across interrupt/process contexts and concurrent
@@ -371,6 +373,8 @@ a pid before calling `NICE`; `HELP` prints per-command usage so the LLM can chec
 how to call a tool at runtime. Data comes from the kernel, formatting happens in
 `agentd` (same split as `get_deny`).
 
+![Natural-language `PS` — output marks `init` as `[K]` (kernel class, prio −5) and `agentd` as `[A]` (agent class).](../docs/assets/agent-ps.png)
+
 ### 6.3 Defense in depth *(KR: 다중 방어)*
 
 1. **Configurable deny-list at the kernel** — default `KILL`/`EXEC` blocked
@@ -459,6 +463,10 @@ curated set (`echo`, `sh`, `cat`, `ls`, `grep`, …) from the root file system
 into `/agentbox`. Hard-linking — not copying — keeps `fs.img` small and means
 the jail and host see the same inode (the jail still cannot escape, because
 `namex()` refuses `..` above `jail_root`).
+
+| Natural-language → SPAWN, allow path | The jailed listing those binaries came from |
+| --- | --- |
+| ![`make a process that runs echo 'hello'` → `[jail] requests 'exec' — allow within 15s? (y/N)` `y` → `SPAWN /echo done (status=0)`](../docs/assets/confirm-escape-allow.png) | ![`list files in /agentbox` shows the `echo`/`cat`/`ls`/`grep`/`sh`/… that `populate_jail()` hard-linked](../docs/assets/jail-populate.png) |
 
 ### 6.7 Cache lookup strip-normalize (Issue A)
 

@@ -215,6 +215,8 @@ you ▸ 11 + 22가 얼마인지 알려줘                  ← 동일 요청 재
 ╰────────────────────╯
 ```
 
+![반복 산수 질문 — 2번째 호출이 `[cache HIT] Solar not called`](docs/assets/cache-hit.png)
+
 ### 5.2 샌드박스 — confirm-escape 게이트와 jail 거부
 
 프로세스를 띄우면 호스트에게 `y/N`을 묻고, jail 밖 읽기나 다른 프로세스 renice는 커널이 거부한다.
@@ -236,17 +238,25 @@ you ▸ pid 1 프로세스의 우선순위를 19로 낮춰줘
    xv6 ┃ [agentd] NICE: denied (pid=1 prio=19)                       ← 격리 에이전트는 타 프로세스 renice 불가
 ```
 
-### 5.3 스크린샷 / GIF — *추후 추가*
+| `spawn` 허용(`y`) | `spawn` 거부(`N`) |
+| --- | --- |
+| ![spawn echo 허용 — `SPAWN /echo done (status=0)`](docs/assets/confirm-escape-allow.png) | ![spawn echo 거부 — `denied (confirm-escape)`](docs/assets/confirm-escape-deny.png) |
 
-위 실행을 녹화해 [`docs/assets/`](docs/assets/)에 넣으면 아래 링크가 렌더된다. 녹화
-레시피(asciinema + agg)는 [`docs/assets/README.md`](docs/assets/README.md)에 있다.
+![pid 1(init) 우선순위 변경 거부 — `init`은 kernel-class라 kernel-class 호출자만 변경 가능](docs/assets/nice-init-denied.png)
 
-| 무엇을 캡처 | 명령 | 자리표시 |
+### 5.3 자연어 → 커널 도구 — 실제 세션 캡처
+
+아래 4장은 §5.2의 3장(`spawn` 허용/거부 + `init` `NICE` 거부)과 §5.1의 1장(캐시
+hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `agent.py`
+라이브 세션에서 캡처. 녹화 레시피(asciinema + agg)와 아직 안 들어온 GIF /
+`priority_test` / `cfs_bench` 후보는 [`docs/assets/README.md`](docs/assets/README.md).
+
+| 사용자가 입력한 프롬프트 | 커널이 한 일 | 캡처 |
 | --- | --- | --- |
-| 에이전트 REPL 멀티스텝 | `make qemu-agent` + `python3 agent.py` | `![agent demo](docs/assets/agent-demo.gif)` |
-| 반복 질문의 F9 캐시 히트 | 에이전트 모드에서 같은 질문 반복 | `![cache hit](docs/assets/cache-hit.png)` |
-| `priority_test` 전부 PASSED | `make qemu` → `priority_test` | `![priority test](docs/assets/priority-test.png)` |
-| `cfs_bench` CPU 점유 표 | `make qemu CPUS=1` → `cfs_bench` | `![cfs bench](docs/assets/cfs-bench.png)` |
+| *"/agentbox 안의 파일들을 보여줘"* | `agentd`가 `LS` 실행 — `populate_jail()`이 부팅 시 hard-link한 `echo`/`cat`/`ls`/`grep`/`sh`/…가 보임 (이게 있어야 `SPAWN`이 실제로 `exec`할 게 생김) | [![jail ls](docs/assets/jail-populate.png)](docs/assets/jail-populate.png) |
+| *"현재 실행 중인 프로세스 보여줘"* | `agentd`가 `PS` 실행(`procinfo` syscall) — `init`은 `[K]`(kernel class, prio −5), `agentd`는 `[A]`(agent class)로 표시. LLM이 `NICE` 호출 전에 pid를 알아낼 수 있게 됨 | [![ps](docs/assets/agent-ps.png)](docs/assets/agent-ps.png) |
+| *"/plan.txt에 'TODO 1\nTODO 2' 라고 써줘"* | `WRITE`가 jail FS에 도달 — `agent.py:_wire_escape`가 `\n` → `\\n`으로 바꿔 보내고, `agentd:unescape_inplace`가 복원해서 와이어에서 잘리지 않음 | [![write](docs/assets/agent-write.png)](docs/assets/agent-write.png) |
+| *"방금 만든 파일을 다시 읽고 요약해줘"* | 후속 턴 — `agent.py`가 `self.messages`에 대화를 유지하므로 모델이 *어떤 파일*인지 앎; `READ`가 두 줄을 반환하고 모델이 요약 | [![read + memory](docs/assets/agent-read-memory.png)](docs/assets/agent-read-memory.png) |
 
 ---
 
@@ -368,4 +378,3 @@ you ▸ pid 1 프로세스의 우선순위를 19로 낮춰줘
 
 - xv6-riscv는 MIT(`xv6-riscv/LICENSE`); 본 프로젝트 변경분도 동일 라이선스로 공개.
 - 설계 모티프: Kai Mei et al., *AIOS: LLM Agent Operating System*, 2024.
-</content>

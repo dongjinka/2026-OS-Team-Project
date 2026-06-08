@@ -83,7 +83,7 @@ in-kernel IPC queue, and the file system — see
 | **12** | ~05-18 → 05-22 | Integrated prototype + ≥1 eval metric | **Core LLM-OS features** (`30c81dc`, 05-18 — CFS/priority/sandbox/agent loop); **eval automation** Test 3 + `cfs_share` + CHANGELOG + Implementation.md rewrite + `.gitignore` mkfs fix (`f3807d4`/`66a45e1`/`2e0664b`/`1a252d4`, 05-20); **jail-based sandbox** rewrite (`26d9269`, 05-21); **F9 cache** port + command-path wiring (`76b2737`/`7d4dd19`/`5fd0d44`, 05-22); **security guards** NICE + `sys_procinfo` (`a59ee1f`, 05-22); **AI self-observation** PS/HELP (`ad6cd20`, 05-22); configurable deny-list (`13030e0`, 05-22); semantic cache → word-level Jaccard (`c436131`, 05-22) |
 | **13a** | ~05-26 | First hardening round | **9-test regression harness** + 3 latent-bug fixes (`05bbe38`, 05-26); REPL backspace fix (`7a539b0`); **confirm-escape v1** (`ac013d6`); agent.py `run_tool` timeout 12 s → 24 s + marker retry (`c77e0a6`); jail confirm-escape branch **temporarily disabled** to dodge a `kerneltrap` panic (`40bf608`); PR #10 merged 05-26 |
 | **13b** | ~05-28 → 05-31 | Natural-language stabilisation + doc sync | **Confirm-escape v2** (sleep/wakeup on dedicated channel, `clockintr` timeout, inline `try_inline_confirm_res` bypass of the queue); **`spawn` tool verb** + `populate_jail()` hard-link of core binaries; `console.c` `REQ\|` payload echo skip (wire byte-race fix); `_cache_lookup` strip-normalize (Issue A — same prompt now hits on 2nd call); **two new regression harnesses** — `tools/ralph_battery.py` (26 shell/syscall scenarios, port 5555) + `tools/ralph_natlang.py` (39 NL scenarios, port 6666); **cumulative 65 / 65 GREEN** (`574c3d7`, 05-28; PR #11 merged 05-28). Doc consistency pass `b51938a` (05-31) updated CHANGELOG·Implementation·README.en·Weekly to match. **English deliverables (README.en + Technical Report + Development Process) committed** (`8ee2db7`, 05-28; PR #12 merged 05-31) |
-| **14** | 2026-06-04 → final presentation | **Final presentation** (English) + audit pass | **Adversarial security audit on `origin/Dongjin`** (`24202ad`/`c9e2875`, 06-04) — 7 dimensions, 16 confirmed findings, 1 reproduced by `tools/sec_audit.py`; **main 불변** principle (audit is additive; fixes ship as separate PRs). Still pending: **English slides (Deliverable #4)**, **demo capture** (asciinema → GIF for `docs/media/`), and triage of audit findings (security PR plan). |
+| **14** | 2026-06-04 → final presentation | **Final presentation** (English) + audit pass | **Adversarial security audit on `origin/Dongjin`** (`24202ad`/`c9e2875`, 06-04) — 7 dimensions, 16 confirmed findings, 1 reproduced by `tools/sec_audit.py`; **main 불변** principle (audit is additive; fixes ship as separate PRs). **Demo media captured 2026-06-08** — 8 PNGs of real `solar-pro2` agent-mode sessions landed in [`docs/assets/`](../docs/assets/) (cache HIT, confirm-escape allow/deny, `NICE` denied on `init`, `populate_jail` ls, PS `[K]`/`[A]`, WRITE, READ + conversation memory); README §5.1/§5.2/§5.3 and Technical Report §4.4/§6.2/§6.6 now render them inline. Still pending: **English slides (Deliverable #4)**, GIF capture, triage of audit findings. |
 
 *(KR: 오늘 기준(2026-06-04, Week 14). 남은 일: 영어 슬라이드, 데모 캡처,
 보안 감사 발견 #1·#2·#3·#4 별도 PR 정리.)*
@@ -315,15 +315,19 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 
 ### Remaining before the final presentation *(남은 일)*
 - **English presentation slides** (Deliverable #4) — not yet started.
-- **Demo capture** for `docs/media/` (asciinema → GIF; placeholders in the
-  English README list the exact commands).
+- **Demo capture (PNG done 2026-06-08, GIF still pending).** 8 PNGs of live
+  `solar-pro2` agent-mode sessions are in [`../docs/assets/`](../docs/assets/)
+  (cache HIT, confirm-escape allow/deny, `NICE` denied on `init`, `populate_jail`
+  listing, PS `[K]`/`[A]` markers, WRITE, READ + conversation memory) — README
+  §5.1/§5.2/§5.3 and Technical Report §4.4/§6.2/§6.6 render them inline. An
+  asciinema → GIF of the full ReAct loop is the remaining piece.
 - **Audit triage on `feature/dongjin-security-suite`** — at minimum land PRs for
   findings #1 (confirm self-resolve), #2 (cache jail-root), #3 (NICE
   self-scope), #4 (wire-escape gaps). Each PR must keep the 65 / 65 baseline.
 - Final rehearsal of the English presentation.
 
-> *(KR: 제출 전 반드시 — 영어 슬라이드 작성, 데모 캡처, 보안 감사 4건 별도 PR
-> 정리, 영어 리허설.)*
+> *(KR: 제출 전 반드시 — 영어 슬라이드 작성, asciinema GIF 캡처(PNG 8장은
+> 06-08에 들어옴), 보안 감사 4건 별도 PR 정리, 영어 리허설.)*
 
 ---
 

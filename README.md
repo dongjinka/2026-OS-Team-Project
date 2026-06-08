@@ -225,6 +225,8 @@ you ▸ In one short sentence, what is a system call?          ← same request 
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
+![F9 cache hit on a repeated arithmetic question (2nd call: `[cache HIT] Solar not called`)](docs/assets/cache-hit.png)
+
 ### 5.2 Sandbox — confirm-escape gate and jail denials
 
 Spawning a process asks the host `y/N`; reading outside the jail or renicing another
@@ -248,18 +250,26 @@ you ▸ lower the priority of process 1 to 19
    xv6 ┃ [agentd] NICE: denied (pid=1 prio=19)                       ← a jailed agent cannot renice others
 ```
 
-### 5.3 Screenshots / GIF — *to be added*
+| `spawn` allow (host answers `y`) | `spawn` deny (host answers `N`) |
+| --- | --- |
+| ![spawn echo allowed — `SPAWN /echo done (status=0)`](docs/assets/confirm-escape-allow.png) | ![spawn echo denied — `denied (confirm-escape)`](docs/assets/confirm-escape-deny.png) |
 
-Capture the runs above and drop the files in [`docs/assets/`](docs/assets/); then the
-links below will render. A recording recipe (asciinema + agg) is in
-[`docs/assets/README.md`](docs/assets/README.md).
+![jailed `NICE` against pid 1 refused — `init` is kernel-class and only a kernel-class caller can demote it](docs/assets/nice-init-denied.png)
 
-| What to capture | Command | Placeholder |
+### 5.3 Natural-language → kernel tool — real session captures
+
+The four captures below sit alongside the three already inlined in §5.2 (`spawn`
+allow/deny + `NICE` on `init`) and the one in §5.1 (cache hit) — eight in total,
+all real `solar-pro2` runs through `agent.py`, captured 2026-06-08. The asciinema
+recording recipe and the still-missing GIF / `priority_test` / `cfs_bench`
+candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
+
+| Prompt the user typed | What the kernel did | Capture |
 | --- | --- | --- |
-| Agent REPL multi-step task | `make qemu-agent` + `python3 agent.py` | `![agent demo](docs/assets/agent-demo.gif)` |
-| F9 cache hit on a repeated question | agent mode, repeat the same question | `![cache hit](docs/assets/cache-hit.png)` |
-| `priority_test` all PASSED | `make qemu` → `priority_test` | `![priority test](docs/assets/priority-test.png)` |
-| `cfs_bench` CPU-share table | `make qemu CPUS=1` → `cfs_bench` | `![cfs bench](docs/assets/cfs-bench.png)` |
+| *"List the files in /agentbox"* | `agentd` runs `LS`; the listing shows the `echo` / `cat` / `ls` / `grep` / `sh` / … that `populate_jail()` hard-linked at boot so `SPAWN` can actually `exec` something | [![jail ls](docs/assets/jail-populate.png)](docs/assets/jail-populate.png) |
+| *"Show me the currently running processes"* | `agentd` runs `PS` (`procinfo` syscall); output marks `init` as `[K]` (kernel class, prio −5) and `agentd` as `[A]` (agent class) — the LLM can now discover pids before calling `NICE` | [![ps](docs/assets/agent-ps.png)](docs/assets/agent-ps.png) |
+| *"Write 'TODO 1\nTODO 2' into a file called /plan.txt"* | `WRITE` reaches the jailed FS; the `\n` survives the wire because `agent.py:_wire_escape` swaps it for `\\n` and `agentd:unescape_inplace` restores it | [![write](docs/assets/agent-write.png)](docs/assets/agent-write.png) |
+| *"Re-read the file you just created and summarize it"* | follow-up turn — `agent.py` keeps the dialogue in `self.messages`, so the model knows *which* file; `READ` returns the two lines and the model summarises | [![read + memory](docs/assets/agent-read-memory.png)](docs/assets/agent-read-memory.png) |
 
 ---
 
@@ -383,4 +393,3 @@ CHANGELOG).
 
 - xv6-riscv is MIT-licensed (`xv6-riscv/LICENSE`); our changes are released under the same license.
 - Design motif: Kai Mei et al., *AIOS: LLM Agent Operating System*, 2024.
-</content>

@@ -18,6 +18,7 @@ This folder holds the detailed reports and the security/evaluation evidence.
 |---|---|---|
 | Security audit & fixes | [`SECURITY_AND_EVALUATION.md`](SECURITY_AND_EVALUATION.md) — EN summary | [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) — full audit (KR) |
 | Quantitative benchmarks | [`BENCHMARKS.md`](BENCHMARKS.md) — raw CFS / cache numbers | `Technical_Report.md` §2 / §6 — method |
+| Demo media | [`assets/README.md`](assets/README.md) — index of the 8 PNG captures inlined by the root READMEs / Technical Report | `assets/*.png` — `solar-pro2` live runs (2026-06-08) |
 
 Reproduce the above with the red-team harnesses (`tools/sec_audit.py`,
 `tools/sec_wire.py`) and the benchmark harness (`tools/bench_report.py`).
