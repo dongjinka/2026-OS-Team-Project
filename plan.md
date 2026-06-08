@@ -1,5 +1,10 @@
 # 구현 계획서 — OS for LLM (Direction A)
 
+> **📁 아카이브 (2026-05-18 시점 계획).** 이 문서는 초기 구현 계획·진행 스냅샷이다.
+> **최신 진행 상황·변경 이력은 [CHANGELOG.md](CHANGELOG.md)**, 주차별 타임라인은
+> [docs/Development_Process.md](docs/Development_Process.md) §3·§5를 참조. 이 파일은
+> 역사적 기록으로 보존하며 더 이상 갱신하지 않는다.
+
 본 문서는 김승범·김세중 제안 아이디어와 `Project_requirements.md` Direction A를
 기준으로 한 **구현 계획·진행 현황·남은 작업** 정리.
 

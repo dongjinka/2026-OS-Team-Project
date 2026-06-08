@@ -518,9 +518,8 @@ limitations that remain on this path:
   loop) but worth queueing if multiple agent processes ever block on confirm
   simultaneously.
 - **Nonce binding.** `confirm_resolve(pid, allow)` matches only on pid — no
-  generation counter. The adversarial audit (`origin/Dongjin`,
-  [SECURITY_AUDIT.md](https://github.com/dongjinka/2026-OS-Team-Project/blob/Dongjin/docs/SECURITY_AUDIT.md)
-  #1) identifies this as a path through which a jailed agent could self-resolve
+  generation counter. The adversarial audit
+  ([SECURITY.md](SECURITY.md) #1) identifies this as a path through which a jailed agent could self-resolve
   by issuing `sys_dispatch("REQ|CONFIRM_RES|<self>|y")`. The proposed mitigation
   is to (a) refuse `CONFIRM_RES` from `is_agent` callers in `sys_dispatch`, and
   (b) bind a per-request generation nonce into the wire format. Both changes
@@ -547,7 +546,7 @@ documented here because it can otherwise look like one.
 A 7-dimension adversarial audit of the custom code (command path · jail ·
 confirm-escape · F9 cache · host bridge) lives on the
 **`origin/Dongjin`** branch (commits `c9e2875`, `24202ad`, 2026-06-04;
-`SECURITY_AUDIT.md` in `docs/`). It is **additive** — `main` is kept
+consolidated into [`SECURITY.md`](SECURITY.md)). It is **additive** — `main` is kept
 invariant under the audit's "main 불변" rule, so fixes ship as separate PRs.
 Raw 20 candidates → **16 confirmed** (4 rejected / downgraded). One is
 already reproduced by the red-team harness (`tools/sec_audit.py`):

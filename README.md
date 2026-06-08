@@ -296,7 +296,7 @@ candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
 Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions across 16 + 17
 scenarios; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
 isolated ports + per-run `fs.img` copies, so they run alongside a live 4444 session.
-Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md).
+Security findings & fixes: [docs/SECURITY.md](docs/SECURITY.md); quantitative eval numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -326,7 +326,7 @@ Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SEC
 ├── agent.py                   host-side ReAct bridge; :ask = F9 cache path
 ├── .env.example               copy to .env, add the Solar key (gitignored)
 ├── docs/                      reports, security/eval, benchmarks, media  (→ docs/README.md)
-├── tools/                     regression harnesses · red-team · bench scripts
+├── tools/                     regression harnesses · red-team · bench · shared qemu_harness.py
 └── xv6-riscv/
     ├── kernel/
     │   ├── proc.{c,h}         CFS weights, vruntime, is_agent / jail_root
@@ -359,8 +359,7 @@ Deep, code-referenced detail: [Implementation.md](Implementation.md).
   `cache_set`/`disk_scan`), and a **re-jail inode-ref leak** (#12). Still open: **#2** (cache
   `/cache.bin` resolving through the jail — only the forged-record-feedback half is now
   mitigated by #11) and **#5** (deny-list default not covering `SPAWN`). See
-  [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md) and the full audit
-  [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+  [docs/SECURITY.md](docs/SECURITY.md) (EN overview + full finding register #1–#13).
 - **SMP** — `make qemu-agent` runs single-core to avoid a known kernelvec trap-entry race
   (`scause=0xf`); shell mode (`make qemu`) boots with smp>1.
 - **Solar tokenizer boundary** — a Korean particle abutting a number (e.g. `"22 + 45는?"`)

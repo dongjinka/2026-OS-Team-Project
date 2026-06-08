@@ -149,7 +149,7 @@ in-kernel IPC queue, and the file system — see
   candidates → **16 confirmed**; 1 reproduced live by `tools/sec_audit.py`
   (jailed `NICE` not self-scoped — `RESULT=VULNERABLE`). All work is on
   **`feature/dongjin-security-suite`** / `origin/Dongjin` and is **additive**
-  (`SECURITY_AUDIT.md`, `tools/sec_audit.py`, `user/secnice.c`); main is held
+  (`SECURITY.md`, `tools/sec_audit.py`, `user/secnice.c`); main is held
   invariant under the "main 불변" rule so the audit is reproducible against
   `cc40a08`. Actual fixes will ship as separate PRs.
 - Team-wide remaining work: English slides (Deliverable #4), demo capture
@@ -269,7 +269,7 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 | 18 | Confirm-escape prompt was answered with stale `\n` from prior input and auto-denied without showing the prompt | (a) Timeout extended 5 s → 15 s. (b) `agent.py:_handle_confirm_req` now calls `termios.tcflush(TCIFLUSH)` before `input()` to drain stale stdin. (c) `sh` added to `populate_jail()` for `SPAWN /sh` paths. | Se-Joong · 05-28 |
 | 19 | Multi-line `/plan.txt TODO 1\nTODO 2` was truncated on the wire | `agent.py:_wire_escape` escapes `\n` → `\\n` for `chat`/`write`/`print`; `user/agentd.c:unescape_inplace` restores it before writing. | Se-Joong · 05-28 |
 | 20 | Adversarial audit (06-04) **reproduced** that jailed `NICE` is not self-scoped — a jailed agent could renice any user-class proc → scheduling DoS | Reproduction binary `user/secnice.c` + `tools/sec_audit.py` (`RESULT=VULNERABLE`); proposed ~3-line fix (`if (myproc()->is_agent && pid != myproc()->pid) return -1;`) on a separate PR (main 불변) | Dongjin · 06-04 |
-| 21 | Audit also flagged 3 more HIGH/MEDIUM paths (confirm-`CONFIRM_RES` self-resolution, `/cache.bin` resolving under `jail_root`, wire-escape gaps on `read`/`write` filenames + `spawn` argv) | Documented in `SECURITY_AUDIT.md` (`origin/Dongjin`) with `file:line`, severity, fix risk, status; gated through separate PRs to keep the 65 / 65 baseline measurable | Dongjin · 06-04 |
+| 21 | Audit also flagged 3 more HIGH/MEDIUM paths (confirm-`CONFIRM_RES` self-resolution, `/cache.bin` resolving under `jail_root`, wire-escape gaps on `read`/`write` filenames + `spawn` argv) | Documented in `SECURITY.md` (`origin/Dongjin`) with `file:line`, severity, fix risk, status; gated through separate PRs to keep the 65 / 65 baseline measurable | Dongjin · 06-04 |
 | 22 | Audit's own "false-positive guard": one proposed fix would create an **A-B / B-A deadlock** between `p->lock` and `tickslock` (vs `clockintr`) | Recorded as a fix to **not apply**; alternative is to leave `allocproc`'s ticks read as a benign race | Dongjin · 06-04 |
 
 ---
@@ -336,10 +336,10 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
 - Architecture & OS concepts: [Technical_Report.md](Technical_Report.md)
 - Setup / run / demo: [../README.md](../README.md) (English) · [../README.ko.md](../README.ko.md) (Korean)
 - Code-referenced detail: [../Implementation.md](../Implementation.md)
-- Feature status: [../plan.md](../plan.md) · Change log: [../CHANGELOG.md](../CHANGELOG.md)
-- Korean weekly status: [../Weekly_Development_Process.md](../Weekly_Development_Process.md) *(Week 9 → 14 진행 요약)*
-- **Adversarial audit (on `origin/Dongjin`, additive):** `SECURITY_AUDIT.md`
-  (16 findings, file:line, severity, status) + `tools/sec_audit.py`
+- Feature status: [../plan.md](../plan.md) *(archived 2026-05-18)* · Change log: [../CHANGELOG.md](../CHANGELOG.md)
+- Korean weekly chronology: §3 (Timeline) and §5 (Meeting Notes) above, plus [../CHANGELOG.md](../CHANGELOG.md)
+- **Adversarial audit:** [`SECURITY.md`](SECURITY.md)
+  (full finding register #1–#13, file:line, severity, status) + `tools/sec_audit.py`
   (red-team harness) + `xv6-riscv/user/secnice.c` (NICE-escalation
   reproduction). Audit branch: `feature/dongjin-security-suite` →
   pushed to `origin/Dongjin` (commits `24202ad`/`c9e2875`, 2026-06-04).

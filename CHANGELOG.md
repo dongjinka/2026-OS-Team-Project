@@ -43,10 +43,17 @@
   통일해 중복 제거.
 - 문서(README·README.ko·docs/BENCHMARKS·docs/SECURITY_AND_EVALUATION·
   docs/assets/README)의 `cfs_bench` 참조를 `cfs_share`로 갱신.
+- **문서 정리/통합** — `docs/SECURITY_AND_EVALUATION.md`(EN)와 `docs/SECURITY_AUDIT.md`(KR)를
+  단일 [`docs/SECURITY.md`](docs/SECURITY.md)(§1 EN 개요 + §2 KR 전체 발견 등록부)로 병합;
+  평가 수치는 이미 `docs/BENCHMARKS.md`에 있어 중복 제거. `Weekly_Development_Process.md`는
+  `docs/Development_Process.md` §3·§5가 EN으로 전부 커버하므로 삭제. `plan.md`는 2026-05-18
+  스냅샷으로 아카이브 헤더 표기. 모든 교차참조/인덱스(`docs/README.md`)·README §8의
+  `qemu_harness.py` 누락을 갱신. 코드 대조로 기술 주장 재검증(14/15 정확 → 노후 1건 수정).
+  순감: 17 → 15 `.md`.
 
 ### Security (2026-06-09 — server3342)
 2차 **전체-코드 감사**(diff 아닌 코드베이스 전체 sweep)에서 미변경 기존 코드의
-취약점을 발견·수정. 상세는 [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) §2-2(#10–#13).
+취약점을 발견·수정. 상세는 [docs/SECURITY.md](docs/SECURITY.md) §2-2(#10–#13).
 - **deny-list 우회 (#10, HIGH)** — `handle_llm_resp`·`handle_ask` 정확-캐시-히트가
   `forward_wire_to_agentd`를 deny 검사 없이 호출해 `REQ|LLM_RESP|<cmd>` / `CACHE_SET`→`ASK`
   재생으로 deny된 명령이 agentd 도달. deny 검사를 `forward_wire_to_agentd` **단일

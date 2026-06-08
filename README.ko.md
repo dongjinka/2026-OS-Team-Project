@@ -282,8 +282,8 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 
 누적 회귀 **65/65 GREEN** (65는 16+17개 시나리오에 걸친 `record()` 단언 수이며, 일부는
 동작 정확성보다 "panic 없음" 게이트다). 두 하네스는 격리 포트 + 실행마다 `fs.img` 복사본을
-써서 라이브 4444 세션과 동시 실행된다. 정량 보안·평가 수치:
-[docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md).
+써서 라이브 4444 세션과 동시 실행된다. 보안 발견·수정: [docs/SECURITY.md](docs/SECURITY.md);
+정량 평가 수치: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -313,7 +313,7 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 ├── agent.py                   호스트 측 ReAct 브릿지; :ask = F9 캐시 경로
 ├── .env.example               .env로 복사 후 Solar 키 입력 (gitignore)
 ├── docs/                      보고서 · 보안/평가 · 벤치마크 · 미디어  (→ docs/README.md)
-├── tools/                     회귀 하네스 · 레드팀 · 벤치 스크립트
+├── tools/                     회귀 하네스 · 레드팀 · 벤치 · 공용 qemu_harness.py
 └── xv6-riscv/
     ├── kernel/
     │   ├── proc.{c,h}         CFS 가중치, vruntime, is_agent / jail_root
@@ -343,8 +343,7 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
   단일 chokepoint로 일원화), **캐시값 wire 라인 위조**(심은 값의 개행 주입 → #11,
   `cache_set`/`disk_scan` 출처 정화), **재-jail inode ref 누수**(#12). 오픈: **#2**(캐시
   `/cache.bin`의 jail 해석 — 위조-되먹임 절반만 #11로 완화) · **#5**(거부 목록 기본값이
-  `SPAWN` 미커버). [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md)
-  와 전체 감사 [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) 참조.
+  `SPAWN` 미커버). [docs/SECURITY.md](docs/SECURITY.md) (EN 개요 + 전체 발견 등록부 #1–#13) 참조.
 - **SMP** — `make qemu-agent`는 알려진 kernelvec 트랩 진입 race(`scause=0xf`)를 피해
   단일 코어로 돈다. 셸 모드(`make qemu`)는 smp>1로 부팅.
 - **Solar 토크나이저 경계** — 한글 조사가 숫자에 붙으면(예: `"22 + 45는?"`) 토큰이 누락될

@@ -135,7 +135,7 @@ multiple files to understand:
 - `agent.py` — host ReAct bridge; `:ask` = F9 cache path; mock vs Solar mode.
 
 Deeper, code-referenced detail lives in `Implementation.md`, `docs/Technical_Report.md`,
-and the security audit `docs/SECURITY_AUDIT.md` / `docs/SECURITY_AND_EVALUATION.md`.
+and the security doc `docs/SECURITY.md` (EN overview + full KR finding register).
 
 ## Conventions
 
