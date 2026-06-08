@@ -26,6 +26,36 @@
 - **user/secnice.c** — F3 레드팀 판정을 3-way(VULNERABLE/SAFE/INCONCLUSIVE)로
   보강: victim이 공격 전에 종료해 `setpriority`가 -1을 반환하는 레이스를
   '가드에 의한 거부(SAFE)'와 구분 → 취약 빌드에서의 거짓 SAFE 제거.
+- **kernel/console.c** — confirm-escape **와이어 프레이밍 레이스** 수정. `REQ|`
+  명령의 프리픽스를 바이트마다 echo하던 정책이, agentd의 `confirm_request()`
+  printf와 UART 인터럽트 *사이*에서 interleave해 `REQ|CONFIRM_REQ|<pid>|...`로
+  깨졌고, 호스트가 `CONFIRM_REQ|` 접두를 인식 못 해 프롬프트가 안 뜨고 15초
+  타임아웃 deny되던 문제. REQ| 라인은 프리픽스 echo를 보류(분기 시 flush)하고
+  종결자만 발신하도록 변경 — CONFIRM_REQ·RESP|HIT·`__OBS` 등 모든 호스트-매칭
+  라인 보호. 재현: `tools/confirm_frame.py` 수정 전 6/30 VULNERABLE → 후 0/30 SAFE.
+- **agent.py** — confirm 프롬프트 호스트 처리 강화: (a) `_parse_confirm_req`로
+  깨진 프리픽스 복구(이중 방어), (b) 프롬프트 동안 reader 라이브 출력 보류 +
+  `select` 15초 제한으로 좀비 reader가 다음 REPL 입력을 가로채던 문제 제거,
+  (c) `_read_line`이 confirm 활성 중 stdin 양보(동시 독자 제거).
+- **kernel/confirm.c** — 헤더 주석의 노후 "5초" timeout을 실제 "15초(150 ticks)"로 정정.
+- **문서 사실 정합성 패스** — 코드/git 히스토리 대조로 6개 문서의 불일치 ~21건 수정:
+  `docs/Technical_Report.md`(semantic 임계 0.7→0.40, #3/#4 상태, agentq 락 종류 등),
+  `Project_Guide.md`(5초→15초, 4KB→32KB 스택, deny-list 게이트 귀속, CFS 식, 디스크
+  ~4,000, 액션 11개, 라인 재고정), `Implementation.md`(confirm 와이어 pid-first +
+  시그니처 + 라인 재고정), `CHANGELOG.md`(eab475d 날짜 2026-05-11),
+  `docs/Development_Process.md`(부재 브랜치/`README.en.md` 참조 정정),
+  `README.md`/`README.ko.md`(§6 시나리오/체크 라벨 정리), `CLAUDE.md`(`eval semantic` 추가).
+
+### Added (2026-06-09 — server3342)
+- **tools/confirm_frame.py** (신규) — confirm 프레이밍 레이스 qemu 재현기(포트 5559):
+  spawn→confirm 스트레스 후 원시 transcript에서 깨진 `CONFIRM_REQ` 검출
+  (`VULNERABLE`/`SAFE`). 격리 포트 + fs 복사본이라 4444 세션과 병행 가능.
+- **tools/confirm_wire.py** (신규) — `agent._parse_confirm_req()` 호스트 단위 테스트
+  (qemu 불필요): `RCONFIRM_REQ|...` 등 프리픽스 깨짐을 복구하는지 검증.
+- **tools/confirm_tty.py** (신규) — pty 기반 **대화형** confirm 입력 경로
+  (`_read_confirm_answer`의 `select`+`os.read` 분기) 단위 테스트(허용/거부/타임아웃/부분입력).
+- **docs/UNIT_IO_MATRIX.md** (신규) — 에이전트 명령 경로 단위기능별 입력→기대출력→
+  검증 하네스 매트릭스(15개 단위, 13 실행검증 + 2 코드트레이스).
 
 ### Changed (2026-06-09 — server3342)
 - **user/cfs_share.c** — argv(`cfs_share <ticks> <prio>...`)로 파라미터화하고
@@ -351,8 +381,8 @@
 
 이전 커밋들은 `git log --oneline`으로 조회. 주요 마일스톤:
 
-- `eab475d` (2026-04) docs: 코스 요구사항 문서 추가
-- `08157c9` chore: 주간 개발 진행 사항 업데이트
+- `eab475d` (2026-05-11) docs: 코스 요구사항 문서 추가
+- `08157c9` (2026-05-11) chore: 주간 개발 진행 사항 업데이트
 - 그 외 초기 셋업 커밋들
 
 ---

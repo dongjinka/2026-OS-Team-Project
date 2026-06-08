@@ -289,12 +289,12 @@ candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
 | User → negative-priority escalation / kernel-class demotion | denied |
 | `REQ\|SPAWN\|/echo\|...` | fork+exec inside jail, confirm-escape on exec |
 | F9 `:ask` repeated | MISS then HIT (Solar skipped on hit) |
-| **`tools/ralph_battery.py`** — 26 shell/syscall scenarios (port 5555) | 26/26 PASS |
-| **`tools/ralph_natlang.py`** — 39 natural-language scenarios (mock, port 6666) | 39/39 PASS |
+| **`tools/ralph_battery.py`** — 26 shell/syscall `record()` checks (port 5555) | 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 natural-language `record()` checks (mock, port 6666) | 39/39 PASS |
 | Live Solar ReAct multi-step + memory | ls → read (×N) → summary; the follow-up uses prior context |
 
-Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions across 16 + 17
-scenarios; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
+Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions, grouped into
+≈16 + ≈17 scenario groups; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
 isolated ports + per-run `fs.img` copies, so they run alongside a live 4444 session.
 Security findings & fixes: [docs/SECURITY.md](docs/SECURITY.md); quantitative eval numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

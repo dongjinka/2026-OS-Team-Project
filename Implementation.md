@@ -78,17 +78,17 @@ xv6 커널에 직접 매핑했다.
 
 - 기존 0..20 → **−20..20**으로 확장. **음수 = 커널-클래스.**
 - `procdump` 출력에서 음수는 `[K]`, agent 프로세스는 `[A]` 마커 표시
-  ([proc.c:804-805](xv6-riscv/kernel/proc.c)).
+  ([proc.c:806-807](xv6-riscv/kernel/proc.c)).
 
 ### 1.2 시스템 콜
 
-- `int setpriority(int pid, int prio)` ([sysproc.c:113](xv6-riscv/kernel/sysproc.c))
-- `int getpriority(int pid)` ([sysproc.c:141](xv6-riscv/kernel/sysproc.c))
+- `int setpriority(int pid, int prio)` ([sysproc.c:116](xv6-riscv/kernel/sysproc.c))
+- `int getpriority(int pid)` ([sysproc.c:161](xv6-riscv/kernel/sysproc.c))
 - 번호: `SYS_setpriority=22`, `SYS_getpriority=23` ([syscall.h](xv6-riscv/kernel/syscall.h))
 
 ### 1.3 권한 가드 (F2의 핵심)
 
-`sys_setpriority`는 **두 방향**으로 user/kernel 경계를 지킨다:
+`sys_setpriority`는 **세 방향**으로 user/kernel 경계를 지킨다:
 
 1. **상승 차단** — user-클래스(priority ≥ 0)가 누구에게도 음수 priority를 부여 불가:
    ```c
@@ -102,15 +102,22 @@ xv6 커널에 직접 매핑했다.
    ```
    → 격리 agent가 `NICE`로 init/커널-클래스를 user 범위로 끌어내리는 강등을 차단.
    커널-클래스 호출자만 가능.
+3. **격리 agent 자기-한정** — 격리 agent(`is_agent`)는 **자기 자신만** renice 가능,
+   다른 user 프로세스 대상은 거부 (jail 안에서의 스케줄링 DoS 차단):
+   ```c
+   if(myproc()->is_agent && pid != myproc()->pid)
+     return -1;
+   ```
+   ([sysproc.c:132](xv6-riscv/kernel/sysproc.c)).
 
 ### 1.4 init은 커널-클래스
 
 `userinit()`이 첫 프로세스(`init`, pid 1)를 **priority −5**로 시작
-([proc.c:303](xv6-riscv/kernel/proc.c)). init은 고아 프로세스 회수·셸 재기동
+([proc.c:305](xv6-riscv/kernel/proc.c)). init은 고아 프로세스 회수·셸 재기동
 담당이므로 커널-클래스가 합리적.
 
 fork된 자식은 user 코드를 실행하므로 **user 범위(10)로 환원**되어 커널-클래스가
-전체로 전파되지 않는다 ([proc.c:371](xv6-riscv/kernel/proc.c)).
+전체로 전파되지 않는다 ([proc.c:373](xv6-riscv/kernel/proc.c)).
 
 ---
 
@@ -140,7 +147,9 @@ static const uint cfs_weight[41] = {
 
 ```c
 uint64 cfs_vdelta(int priority) {
-  int idx = priority + 20;  // clamp 생략
+  int idx = priority + 20;
+  if(idx < 0)  idx = 0;     // clamp [0,40]
+  if(idx > 40) idx = 40;
   return CFS_WMULT * NICE_0_LOAD / cfs_weight[idx];   // 2^20 * 1024 / weight
 }
 ```
@@ -164,11 +173,12 @@ if(which_dev == 2) {
 ### 2.3 전역 min_vruntime
 
 Linux의 `cfs_rq->min_vruntime`을 모방한 **단조 증가 전역 변수**
-`cfs_min_vruntime` + `cfs_lock` 스핀락 ([proc.c:58-80](xv6-riscv/kernel/proc.c)).
+`cfs_min_vruntime` + `cfs_lock` 스핀락 (선언 [proc.c:61-62](xv6-riscv/kernel/proc.c),
+`cfs_min`/`cfs_advance_min` [proc.c:65-79](xv6-riscv/kernel/proc.c)).
 
 - 스케줄러가 매 픽마다 leftmost vruntime으로 전진(`cfs_advance_min`).
 - 신규 프로세스는 `vruntime = cfs_min()`으로 시작 → 즉시 starve하지 않음
-  ([proc.c:187-188](xv6-riscv/kernel/proc.c)).
+  ([proc.c:190-191](xv6-riscv/kernel/proc.c)).
 
 NPROC 매번 스캔하는 옛 `min_vruntime_skip()`은 제거했다.
 
@@ -179,12 +189,12 @@ NPROC 매번 스캔하는 옛 `min_vruntime_skip()`은 제거했다.
 np->priority = (p->priority < 0) ? 10 : p->priority;   // user로 환원
 np->vruntime = p->vruntime;
 ```
-([proc.c:371-372](xv6-riscv/kernel/proc.c))
+([proc.c:373-374](xv6-riscv/kernel/proc.c))
 
 ### 2.5 F4 — wakeup 보정
 
 I/O로 잠들었던 프로세스가 깨어날 때 `max(vruntime, min_vruntime) − BONUS`로 보정
-([proc.c:688-699](xv6-riscv/kernel/proc.c)):
+([proc.c:690-701](xv6-riscv/kernel/proc.c)):
 
 ```c
 uint64 base = (p->vruntime > mvr) ? p->vruntime : mvr;
@@ -197,7 +207,7 @@ p->vruntime = (base > CFS_WAKEUP_BONUS) ? base - CFS_WAKEUP_BONUS : 0;
 ### 2.6 스케줄러 픽
 
 **순차 배열 스캔**으로 RUNNABLE 중 leftmost(min vruntime) 선택. 동률이면
-`creation_tick`(먼저 생긴 것) 우선 ([proc.c:529-551](xv6-riscv/kernel/proc.c)).
+`creation_tick`(먼저 생긴 것) 우선 ([proc.c:531-562](xv6-riscv/kernel/proc.c)).
 요구사항 §1의 RB-Tree 배제 방침 유지.
 
 ---
@@ -245,7 +255,7 @@ p->vruntime = (base > CFS_WAKEUP_BONUS) ? base - CFS_WAKEUP_BONUS : 0;
 
 `agentq_get()`이 슬립락으로 dequeue를 제공하지만, **호출 가능한 주체는 신규
 syscall `sys_agent_recv`뿐이고 이 syscall은 `is_agent=1` 프로세스만 받는다**
-([sysproc.c:163-180](xv6-riscv/kernel/sysproc.c)). → 큐 누출 차단.
+([sysproc.c:183-203](xv6-riscv/kernel/sysproc.c)). → 큐 누출 차단.
 
 ### 3.2 (b) chroot jail + 위험 syscall 차단
 
@@ -255,12 +265,12 @@ int is_agent;             // F7: sandboxed agent process
 struct inode *jail_root;  // F7: chroot jail root inode (0 = no jail)
 ```
 
-**신규 `jail(path)` 시스템 콜** ([sysfile.c:439-465](xv6-riscv/kernel/sysfile.c)):
+**신규 `jail(path)` 시스템 콜** ([sysfile.c:441-466](xv6-riscv/kernel/sysfile.c)):
 호출자를 path에 영구 가둔다. `is_agent=1` 설정. **되돌릴 수 없음** —
 deliberately no "unjail".
 
 **경로 해석 차단** — `namex()`가 agent의 `/`를 `jail_root`로 매핑, `..`로
-jail 위로 올라가려는 시도 차단 ([fs.c:678-710](xv6-riscv/kernel/fs.c)).
+jail 위로 올라가려는 시도 차단 ([fs.c:675-704](xv6-riscv/kernel/fs.c)).
 
 **위험 syscall — confirm-escape 게이트** (2026-05-28 v2) — agent 프로세스가
 `exec`·`kill`·`mknod`를 호출하면 즉시 −1을 반환하지 않고 **호스트 사용자에게
@@ -271,10 +281,15 @@ static int agent_blocked(int num) {
   return num == SYS_exec || num == SYS_kill || num == SYS_mknod;
 }
 // ... 호출 시
-if(agent_blocked(num)) {
-  int decision = confirm_request(num, p->pid);   // sleep on &confirm_wait_chan
-  if(decision == CONFIRM_ALLOW) goto allowed;
-  /* CONFIRM_DENY or TIMEOUT */  return -1;
+if(p->is_agent && agent_blocked(num)) {
+  char summary[32];
+  agent_call_summary(num, summary, sizeof(summary));
+  int allowed = confirm_request(num, summary);   // sleep on &confirm_wait_chan
+  if(!allowed) {                                  // DENY 또는 TIMEOUT
+    p->trapframe->a0 = -1;
+    return;
+  }
+  // approved — fall through to 통상 syscall 디스패치.
 }
 ```
 
@@ -289,9 +304,9 @@ sleep/wakeup**으로 재설계.
 
 | 단계 | 위치 | 동작 |
 |------|------|------|
-| 요청 | `kernel/syscall.c` agent_blocked 분기 | `confirm_request(num, pid)` 호출, 호출자를 `pending[]`에 등록 |
+| 요청 | `kernel/syscall.c` agent_blocked 분기 | `confirm_request(call_num, summary)` 호출, 호출자를 `pending[]`에 등록 |
 | 슬립 | `kernel/confirm.c` `confirm_request` | `sleep(&confirm_wait_chan, &confirm_lock)` |
-| 호스트 전송 | 같은 함수 | `CONFIRM_REQ\|<num>\|<pid>` 라인을 콘솔로 발신 |
+| 호스트 전송 | 같은 함수 | `CONFIRM_REQ\|<pid>\|<call_num>\|<summary>` 라인을 콘솔로 발신 |
 | 호스트 응답 | `agent.py:_handle_confirm_req` | 15초 안에 y/N 입력 (`tcflush(TCIFLUSH)`로 stale enter 제거) |
 | 응답 디스패치 | `kernel/agentcmd.c try_inline_confirm_res` | 큐 우회 — spinlock + 즉시 `wakeup(&confirm_wait_chan)`. 모든 user proc 이 SLEEPING 일 때도 race 없이 도달 |
 | 타임아웃 | `kernel/trap.c clockintr` → `confirm_tick` | 매 tick `pending[]` 스캔, `CONFIRM_TIMEOUT_TICKS=150` (≈15s) 초과시 DENY로 wakeup |
@@ -411,7 +426,7 @@ write 충돌 제거. 색 구분:
 
 | 항목 | 변경 |
 |------|------|
-| `_cache_lookup` strip 정규화 | lookup key에 `.strip()` 추가 (line 800). store 키와 정합 → 동일 prompt 가 2번째부터 `[cache HIT]` (Issue A). |
+| `_cache_lookup` strip 정규화 | lookup key에 `.strip()` 추가 ([agent.py:1000](agent.py)). store 키와 정합 → 동일 prompt 가 2번째부터 `[cache HIT]` (Issue A). |
 | SYSTEM_PROMPT ★ token-boundary | spawn 블록 내부 → standalone clause로 분리. chat/write/print/spawn 모든 도구에 한글/CJK byte 보존, 숫자 drop 금지 신호 (Issue B mitigation — Solar tokenizer가 `"22 + 45는?"`에서 `45` drop하던 회귀 완화). |
 | `_handle_confirm_req` | 프롬프트 "5초"→"15초" 정정, `input()` 직전 `termios.tcflush(TCIFLUSH)`로 stale stdin enter 제거. |
 | `_read_line` cooked 모드 기본 | raw 모드(`_wipe_input`/`_draw_input`)에서 한글 입력시 4-5회 키 입력이 필요한 UX 회귀 → cooked 기본. raw는 `AGENT_RAW_INPUT=1` opt-in. |

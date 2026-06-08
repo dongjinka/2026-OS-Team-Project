@@ -64,7 +64,7 @@ kernel F9 cache path (skips Solar on a hit); `:role <name>` tags following reque
 In-kernel tests are user programs run at the xv6 `$` prompt: `priority_test` (F1/F3/F4),
 `agentdemo` (jail + privilege guards), `cache_test` (F9, 13/13), `cfs_share`
 (CPU-share by priority — run under `CPUS=1`; takes optional `<ticks> <prio>...`
-to sweep, e.g. `cfs_share 150 0 4 8 12 16 19`), `eval cache|acl|fair N`,
+to sweep, e.g. `cfs_share 150 0 4 8 12 16 19`), `eval cache|acl|fair|semantic N`,
 `agent_multi`, `write_race`, `denyctl list`.
 
 Automated regression harnesses live in `tools/`. Each boots its **own** isolated QEMU on a
@@ -77,7 +77,16 @@ python3 tools/ralph_natlang.py     # 39 natural-language scenarios, mock (port 6
 python3 tools/sec_audit.py         # red-team reproducers          (port 5557)
 python3 tools/sec_wire.py          # host-only unit test of agent.py wire_for() (no qemu)
 python3 tools/bench_report.py      # CPU-share + cache hit-rate Markdown report (port 5558)
+python3 tools/confirm_frame.py     # confirm-escape wire-framing race reproducer (port 5559)
+python3 tools/confirm_wire.py      # host-only unit test of _parse_confirm_req() (no qemu)
+python3 tools/confirm_tty.py       # pty unit test of the interactive confirm read path (no qemu)
 ```
+
+The confirm-escape path has three dedicated checks: `confirm_frame.py` (kernel
+console framing — `VULNERABLE`/`SAFE`), `confirm_wire.py` (host recovery of a
+corrupted `CONFIRM_REQ` line), and `confirm_tty.py` (the interactive `select()`
+read path a real user types into). See [`docs/UNIT_IO_MATRIX.md`](docs/UNIT_IO_MATRIX.md)
+for the full unit → input → expected-output → harness table.
 
 Build the kernel + `fs.img` first (`cd xv6-riscv && make`) — the harnesses do not build.
 Single-test example: `./tools/regression.sh --only=cache_test`.

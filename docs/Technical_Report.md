@@ -183,7 +183,8 @@ argument-fetch + dispatch path.
 - `struct proc` gains `int is_agent` and `struct inode *jail_root`
   (`kernel/proc.h`).
 - New **`jail(path)`** syscall (`kernel/sysfile.c`) confines the caller to
-  `path` and sets `is_agent = 1`. It is **irreversible** by design.
+  `path` and sets `is_agent = 1`. A jail **cannot be un-jailed** by design
+  (re-jailing to a deeper path is permitted, but `is_agent` is never cleared).
 - **Path resolution** — `namex()` in `kernel/fs.c` maps an agent's `/` to its
   `jail_root` and refuses `..` traversal above the jail root.
 - **Dangerous syscalls — confirm-escape v2 *(from 2026-05-28)*** — `kernel/syscall.c`
@@ -215,9 +216,11 @@ argument-fetch + dispatch path.
 **Concept:** mutual exclusion across interrupt/process contexts and concurrent
 processes.
 
-- **Spinlocks** guard the deny-list, the CFS global `min_vruntime`, and the
-  cache table.
-- **Sleeplocks** guard the command queue dequeue (`agentq_get`) and, via the
+- **Spinlocks** guard the deny-list, the CFS global `min_vruntime`, the
+  cache table, and the command queue (`agentq`). The queue dequeue
+  (`agentq_get`) holds the `agentq` spinlock and blocks on an empty queue via
+  `sleep`/`wakeup` on it (a condvar), not a sleeplock.
+- **Sleeplocks** guard, via the
   file system, every jailed file operation. `write_race` demonstrates this
   directly: four children issue `WRITE` to the same file at nearly the same
   tick, but `ilock()` serializes them, so their completion ticks step up
@@ -244,7 +247,8 @@ concurrent agents.
   `agent_drain()` → `agent_dispatch_now()` (stage 2), called from `usertrap` and
   `consoleread`.
 - The deny-listed commands are blocked in stage 2; survivors go into a **16-slot
-  ring buffer** (`agentq`). `agentq_get()` is sleeplock-guarded and its **only**
+  ring buffer** (`agentq`). `agentq_get()` is guarded by the `agentq` spinlock
+  (blocking on an empty queue via `sleep`/`wakeup` on it, a condvar) and its **only**
   caller is `sys_agent_recv`, which serves **`is_agent` processes only** — so no
   non-jailed process can drain the agent queue.
 - `agent_multi` spawns **four concurrent role-based agents** that the CFS
@@ -310,7 +314,7 @@ the most recent 24 messages to bound context.
 when RAM is full, `set` evicts an LRU slot to disk (append); a disk hit is
 promoted back to RAM. Keys are compressed with a 64-bit FNV-1a hash; everything
 is a static array (no dynamic allocation). On top of exact matching, **MinHash +
-Jaccard semantic matching** (threshold 0.7) catches paraphrases / reordering /
+Jaccard semantic matching** (threshold 0.40) catches paraphrases / reordering /
 partial substitutions. The cache is reachable via `set_cache`/`get_cache`
 syscalls and is exercised standalone by `cache_test` (13/13).
 
@@ -364,8 +368,8 @@ it via `SETPRIO <FN>:<prio>`.
 | SETPRIO | 1       | 5        | |
 | PS      | 1       | 8        | **AI self-observation** — proc snapshot (pid/state/prio/name) |
 | HELP    | 1       | 0        | **AI self-observation** — usage catalogue |
-| CHAT    | 1       | —        | prints a cache-sourced answer |
-| SPAWN   | 1       | —        | `do_spawn` → fork + exec inside the jail; `exec` triggers confirm-escape v2 (host y/N) |
+| CHAT    | 1       | 10       | prints a cache-sourced answer |
+| SPAWN   | 1       | 10       | `do_spawn` → fork + exec inside the jail; `exec` triggers confirm-escape v2 (host y/N) |
 
 **AI self-observation.** `PS` uses a new `procinfo(buf,max)` syscall
 (`kernel/procinfo.h`) to return a process-table snapshot, so the LLM can discover
@@ -379,8 +383,10 @@ how to call a tool at runtime. Data comes from the kernel, formatting happens in
 
 1. **Configurable deny-list at the kernel** — default `KILL`/`EXEC` blocked
    before reaching `agentd`; humans can extend it, agents cannot.
-2. **Agent syscall layer** — an `is_agent` process is refused
-   `exec`/`kill`/`mknod` regardless.
+2. **Agent syscall layer** — for an `is_agent` process, `exec`/`kill`/`mknod`
+   are confirm-gated: the syscall routes through confirm-escape v2 (§4.4/§6.5)
+   and proceeds only on a host `y` (default deny on `N`/timeout), rather than
+   being unconditionally denied.
 3. **chroot jail** — files outside `/agentbox` are not even *visible*; `..`
    escape is refused in `namex()`.
 
@@ -471,7 +477,7 @@ the jail and host see the same inode (the jail still cannot escape, because
 ### 6.7 Cache lookup strip-normalize (Issue A)
 
 The cache's exact-match path normalises both the stored key and the lookup
-key (`_cache_lookup` in `kernel/cache.c`) by stripping a small set of
+key (in `kernel/cache.c`) by stripping a small set of
 whitespace / quoting variations. The original implementation normalised only
 the lookup side, so identical prompts stored slightly differently would miss
 the second time. The 2026-05-28 fix made stripping symmetric, which is what
@@ -520,10 +526,11 @@ limitations that remain on this path:
 - **Nonce binding.** `confirm_resolve(pid, allow)` matches only on pid — no
   generation counter. The adversarial audit
   ([SECURITY.md](SECURITY.md) #1) identifies this as a path through which a jailed agent could self-resolve
-  by issuing `sys_dispatch("REQ|CONFIRM_RES|<self>|y")`. The proposed mitigation
-  is to (a) refuse `CONFIRM_RES` from `is_agent` callers in `sys_dispatch`, and
-  (b) bind a per-request generation nonce into the wire format. Both changes
-  are scoped to a separate PR; see §7.5.
+  by issuing `sys_dispatch("REQ|CONFIRM_RES|<self>|y")`. Mitigation (a) — refuse
+  `CONFIRM_RES` (indeed any wire command) from `is_agent` callers in
+  `sys_dispatch` — is **implemented** (`sys_dispatch` returns `−1` for any
+  `is_agent` caller). Mitigation (b) — bind a per-request generation nonce into
+  the wire format — remains proposed; it is scoped to a separate PR; see §7.5.
 
 ### 7.3 Solar tokenizer boundary
 
@@ -548,15 +555,16 @@ confirm-escape · F9 cache · host bridge) lives on the
 **`origin/Dongjin`** branch (commits `c9e2875`, `24202ad`, 2026-06-04;
 consolidated into [`SECURITY.md`](SECURITY.md)). It is **additive** — `main` is kept
 invariant under the audit's "main 불변" rule, so fixes ship as separate PRs.
-Raw 20 candidates → **16 confirmed** (4 rejected / downgraded). One is
-already reproduced by the red-team harness (`tools/sec_audit.py`):
+Raw 20 candidates → **16 confirmed** (4 rejected / downgraded). The red-team
+harness (`tools/sec_audit.py`) tracks these against the current build — #3 is
+already fixed on `main`, so its reproducer now reports `SAFE`:
 
 | # | Severity | Issue | Status |
 |---|----------|-------|--------|
 | #1 | HIGH | `CONFIRM_RES` self-resolution path (see §7.2 nonce note) | patch ready |
 | #2 | HIGH | `/cache.bin` resolves under `jail_root` when called from an `is_agent` context → cache split-brain | patch ready |
-| #3 | MEDIUM | Jailed `NICE` is not self-scoped (`sys_setpriority` has no `is_agent && pid != self` guard) → scheduling DoS | **reproduced** |
-| #4 | MEDIUM | `agent.py:wire_for` skips `_wire_escape` on `read` / `write` filenames and `spawn` argv → newline injection | patch ready |
+| #3 | MEDIUM | Jailed `NICE` is not self-scoped → scheduling DoS — now self-scoped (`sys_setpriority` guards `is_agent && pid != self`) | **fixed** |
+| #4 | MEDIUM | `agent.py:wire_for` skipped `_wire_escape` on `read` / `write` filenames and `spawn` argv → newline injection — now escaped | **fixed** |
 | #5 | MEDIUM | Default deny-list `{KILL, EXEC}` doesn't cover `SPAWN` — the actual `exec` surface | documentation backlog |
 
 Plus 4 LOW (cache disk-size guard unreachable, intake-ring silent drop, confirm

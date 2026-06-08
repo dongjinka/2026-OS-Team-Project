@@ -276,11 +276,11 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 | user → 음수 priority 상승 / kernel-class 강등 | 거부 |
 | `REQ\|SPAWN\|/echo\|...` | jail 안 fork+exec, exec에서 confirm-escape |
 | F9 `:ask` 반복 | MISS 후 HIT (히트 시 Solar 생략) |
-| **`tools/ralph_battery.py`** — 26 셸/syscall 시나리오 (포트 5555) | 26/26 PASS |
-| **`tools/ralph_natlang.py`** — 39 자연어 시나리오 (mock, 포트 6666) | 39/39 PASS |
+| **`tools/ralph_battery.py`** — 26 셸/syscall `record()` 체크 (포트 5555) | 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 자연어 `record()` 체크 (mock, 포트 6666) | 39/39 PASS |
 | 라이브 Solar ReAct 멀티스텝 + 메모리 | ls → read (×N) → 요약; 후속 요청이 이전 맥락 활용 |
 
-누적 회귀 **65/65 GREEN** (65는 16+17개 시나리오에 걸친 `record()` 단언 수이며, 일부는
+누적 회귀 **65/65 GREEN** (65는 `record()` 단언 수이며, ≈16+≈17개 시나리오 그룹으로 묶인다. 일부는
 동작 정확성보다 "panic 없음" 게이트다). 두 하네스는 격리 포트 + 실행마다 `fs.img` 복사본을
 써서 라이브 4444 세션과 동시 실행된다. 보안 발견·수정: [docs/SECURITY.md](docs/SECURITY.md);
 정량 평가 수치: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

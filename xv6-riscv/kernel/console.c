@@ -197,20 +197,43 @@ consoleintr(int c)
       // mirror into the agent sniff buffer (skip overflow: too long to be cmd).
       if(agent_len < AGENT_BUF_SIZE-1) agent_buf[agent_len++] = c;
 
-      // Echo policy: REQ| line 의 payload 는 *echo skip* — agent.py 가 보낼
-      // wire 의 byte 단위 echo 가 다른 동시 출력 (예: agentd 의 printf) 와
-      // interleave 해서 garbled lines (`NT|__OBS6__`) 가 socket 으로 새어
-      // 나가는 race 를 차단. 첫 4 byte (R/E/Q/|) 와 line-terminator (\n) 만
-      // echo 해서 line boundary 는 유지 — agent.py reader 의 split('\n') 이
-      // 정상 동작하고, 송신한 wire 가 인접 출력과 합쳐지지 않음.
-      // 일반 사용자 입력 (REQ| 로 시작 안 함) 은 평소대로 echo.
-      int is_req = (agent_len >= 4 &&
-                    agent_buf[0]=='R' && agent_buf[1]=='E' &&
-                    agent_buf[2]=='Q' && agent_buf[3]=='|');
-      if(!is_req)
+      // Echo policy: NEVER echo the bytes of a "REQ|" wire line. The host
+      // filters REQ| lines anyway, and echoing them byte-by-byte is unsafe:
+      // each prefix char is a separate UART interrupt, so agentd's concurrent
+      // printf (e.g. "CONFIRM_REQ|5|7|exec\n") runs in the gap *between* two
+      // echo interrupts and lands inside the echoed prefix — the host then
+      // sees "REQ|CONFIRM_REQ|5|7|exec" and never recognises the confirm.
+      // So: while the line so far is still a viable prefix of "REQ|", DEFER its
+      // echo; once it diverges, flush the deferred bytes and echo normally;
+      // once it is a confirmed "REQ|..." line, echo only the line terminator to
+      // keep a boundary (the host discards the resulting blank line).
+      // Normal user input (not "REQ|") diverges at byte 0 and echoes as before.
+      int match =
+          (agent_len < 1 || agent_buf[0]=='R') &&
+          (agent_len < 2 || agent_buf[1]=='E') &&
+          (agent_len < 3 || agent_buf[2]=='Q') &&
+          (agent_len < 4 || agent_buf[3]=='|');
+      if(match && agent_len >= 4){
+        if(c == '\n')
+          consputc(c);                 // confirmed REQ|: terminator only
+      } else if(match){
+        // agent_len < 4 and still a viable "REQ|" prefix — hold this echo
+      } else {
+        // not a REQ| line: if the earlier bytes were a deferred prefix (this
+        // char is the divergence point), flush them, then echo the current char.
+        int L = agent_len - 1;         // bytes accumulated before this char
+        int prev =
+            (L < 1 || agent_buf[0]=='R') &&
+            (L < 2 || agent_buf[1]=='E') &&
+            (L < 3 || agent_buf[2]=='Q') &&
+            (L < 4 || agent_buf[3]=='|');
+        if(prev && L > 0){
+          int k;
+          for(k = 0; k < L; k++)
+            consputc(agent_buf[k]);
+        }
         consputc(c);
-      else if(agent_len <= 4 || c == '\n')
-        consputc(c);    // "REQ|" prefix + line terminator only
+      }
 
       if(c == '\n' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
         // Try agent dispatch: if line is "REQ|...\n", consume it and hide
