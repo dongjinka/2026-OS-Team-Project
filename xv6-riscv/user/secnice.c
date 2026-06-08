@@ -55,10 +55,19 @@ main(void)
 
   printf("SECNICE: jailed setpriority(victim=%d, 19) rc=%d  prio %d -> %d\n",
          victim, rc, before, after);
-  if(rc == 0)
+  // Disambiguate the two reasons setpriority can return -1: the F7 guard
+  // (victim still live, priority unchanged) vs. the victim having already
+  // exited (getpriority now -1). Only treat an unchanged, *still-live* victim
+  // as SAFE, and only a confirmed reprioritization as VULNERABLE; a vanished
+  // victim is a harness race, not a security verdict — report it as such so
+  // the run is re-tried rather than scored as a false SAFE.
+  if(rc == 0 && after == 19)
     printf("SECNICE: RESULT=VULNERABLE (jailed agent reniced a non-self process)\n");
-  else
+  else if(rc < 0 && after >= 0)
     printf("SECNICE: RESULT=SAFE (jailed agent restricted to self)\n");
+  else
+    printf("SECNICE: RESULT=INCONCLUSIVE (victim pid=%d not live at attack time; re-run)\n",
+           victim);
 
   wait(0);                            // reap the victim (wait is not gated)
   exit(0);

@@ -166,7 +166,8 @@ For the fairness benchmark, a single core makes time-sharing clearest:
 
 ```bash
 make clean && make qemu CPUS=1
-$ cfs_bench                # per-priority CPU-share table (numbers in docs/BENCHMARKS.md)
+$ cfs_share 150 0 4 8 12 16 19   # per-priority CPU-share sweep (numbers in docs/BENCHMARKS.md)
+$ cfs_share                      # short form: the default 3-priority race {1,10,19}
 ```
 
 Quit QEMU with `Ctrl-a x`.
@@ -261,7 +262,7 @@ you ▸ lower the priority of process 1 to 19
 The four captures below sit alongside the three already inlined in §5.2 (`spawn`
 allow/deny + `NICE` on `init`) and the one in §5.1 (cache hit) — eight in total,
 all real `solar-pro2` runs through `agent.py`, captured 2026-06-08. The asciinema
-recording recipe and the still-missing GIF / `priority_test` / `cfs_bench`
+recording recipe and the still-missing GIF / `priority_test` / `cfs_share`
 candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
 
 | Prompt the user typed | What the kernel did | Capture |
@@ -336,7 +337,7 @@ Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SEC
     │   └── sysproc.c          priority guard; agent_recv / cache / dispatch syscalls
     └── user/
         ├── agentd.c           jailed agent worker — tool table + per-fn priority + spawn
-        ├── priority_test.c · cfs_bench.c · cache_test.c · eval.c   tests / benchmarks
+        ├── priority_test.c · cfs_share.c · cache_test.c · eval.c   tests / benchmarks
         └── agent_multi.c · write_race.c                            concurrency / sync demos
 ```
 

@@ -103,7 +103,7 @@ reverted.
 
 ### 2.1 CFS scheduler — priority to CPU share
 
-Six children (`user/cfs_bench.c`) pinned to a spread of priorities race for one
+Six children (`user/cfs_share.c`, run as `cfs_share 150 0 4 8 12 16 19`) pinned to a spread of priorities race for one
 fixed wall-clock window under `-smp 1`; each child's loop count is the CPU it
 won. "Expected share" is the Linux weight ratio (`weight / Σweight`) from the
 ported `cfs_weight[]` table in `kernel/proc.c`.

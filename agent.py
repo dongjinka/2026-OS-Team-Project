@@ -219,15 +219,16 @@ def _wrap_display(s: str, width: int) -> list:
         if cur:
             pieces.append(cur)
             cur = ""
-        while _disp_width(word) > width:        # word alone exceeds the line
-            take = ""
-            for ch in word:
-                if _disp_width(take + ch) > width:
-                    break
-                take += ch
-            pieces.append(take)
-            word = word[len(take):]
-        cur = word
+        # word alone exceeds the line — hard-break it into <=width chunks in a
+        # single linear pass (no repeated full-width rescans of the remainder).
+        start, used = 0, 0
+        for i, ch in enumerate(word):
+            w = _disp_width(ch)
+            if used + w > width and i > start:  # i > start: never emit empty
+                pieces.append(word[start:i])
+                start, used = i, 0
+            used += w
+        cur = word[start:]                      # remainder (<=width) carries on
     if cur or not pieces:
         pieces.append(cur)
     return pieces

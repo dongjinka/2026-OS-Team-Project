@@ -346,8 +346,8 @@ handle_cache_get(char *arg)
 {
   int klen = 0; while(arg[klen]) klen++;
   if(klen == 0){ printf("RESP|MISS\n"); return; }
-  char valbuf[1024];   // CACHE_VAL
-  int vlen = cache_get(arg, klen, valbuf, sizeof(valbuf));
+  char valbuf[1025];   // CACHE_VAL (1024) + room for the NUL terminator
+  int vlen = cache_get(arg, klen, valbuf, sizeof(valbuf) - 1);
   if(vlen < 0){
     printf("RESP|MISS\n");
   } else {
@@ -357,7 +357,9 @@ handle_cache_get(char *arg)
     // and the host parsed the garbled line as a cache MISS — the F9 cache
     // silently failed at the default `make qemu-agent` (smp=3). %s does not
     // interpret '%' in the value, and cache values are nul-free text.
-    if(vlen >= (int)sizeof(valbuf)) vlen = sizeof(valbuf) - 1;
+    // The buffer is CACHE_VAL+1 so a full 1024-byte value keeps all its bytes
+    // (the NUL lands at valbuf[1024]) instead of dropping the last one.
+    if(vlen > (int)sizeof(valbuf) - 1) vlen = sizeof(valbuf) - 1;
     valbuf[vlen] = 0;
     printf("RESP|HIT|%s\n", valbuf);
   }

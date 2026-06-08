@@ -14,6 +14,35 @@
 
 ## [Unreleased]
 
+### Fixed (2026-06-09 — server3342)
+- **kernel/trap.c** — `usertrapret`의 `kernel_sp`를 `p->kstack + PGSIZE`에서
+  `p->kstack + KSTACK_PAGES*PGSIZE`로 수정. 기존엔 `context.sp`(forkret 경로)만
+  8페이지 스택 꼭대기를 가리키고 유저 모드 트랩 진입 경로는 4KB 스택에 머물러,
+  깊은 agent/spawn 체인이 가드 페이지로 넘어가 `scause=0xf`를 냈다 — KSTACK_PAGES
+  확장이 실제 트랩 경로에 도달하도록 일치시킴.
+- **kernel/agentcmd.c** — 캐시 HIT 출력 버퍼를 `valbuf[1025]`로 키우고
+  `cache_get(..., sizeof(valbuf)-1)` 호출. 정확히 1024바이트(CACHE_VAL) 값의
+  마지막 바이트가 NUL로 덮여 잘리던 off-by-one 제거(원자적 단일 printf는 유지).
+- **user/secnice.c** — F3 레드팀 판정을 3-way(VULNERABLE/SAFE/INCONCLUSIVE)로
+  보강: victim이 공격 전에 종료해 `setpriority`가 -1을 반환하는 레이스를
+  '가드에 의한 거부(SAFE)'와 구분 → 취약 빌드에서의 거짓 SAFE 제거.
+
+### Changed (2026-06-09 — server3342)
+- **user/cfs_share.c** — argv(`cfs_share <ticks> <prio>...`)로 파라미터화하고
+  머신 파싱용 `CFSBENCH` 마커를 함께 출력하도록 일반화하여 기존 `cfs_bench.c`를
+  흡수. 인자 없이 실행하면 기존 3-우선순위 기본 race 동작을 유지.
+- **tools/qemu_harness.py** (신규) — qemu 부트 + 시리얼 reader/wait_for/send/
+  FATAL 처리 스캐폴딩을 공용 모듈로 추출. `tools/sec_audit.py`·`tools/bench_report.py`
+  를 이 모듈 사용으로 재작성(3중 복붙 제거, `with` 컨텍스트 매니저 채택).
+- **agent.py** — `_wrap_display` 하드브레이크를 글자마다 prefix를 재측정하던
+  O(n²)에서 표시 폭을 증분 추적하는 단일 선형 패스로 개선.
+- 문서(README·README.ko·docs/BENCHMARKS·docs/SECURITY_AND_EVALUATION·
+  docs/assets/README)의 `cfs_bench` 참조를 `cfs_share`로 갱신.
+
+### Removed (2026-06-09 — server3342)
+- **user/cfs_bench.c** — 파라미터화된 `cfs_share.c`로 통합되어 삭제(Makefile
+  `UPROGS`에서도 제거).
+
 ### Added (2026-06-08 — June)
 - **데모 캡처 8장** `docs/assets/`에 추가 — 모두 `solar-pro2` 라이브
   agent-mode 세션 실제 출력:

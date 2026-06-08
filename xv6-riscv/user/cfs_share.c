@@ -1,34 +1,75 @@
 /*
- * cfs_share.c — Quantitative CFS fairness benchmark.
+ * cfs_share.c — CFS priority -> CPU-share benchmark.
  *
- * Spawns N children with different priorities, lets them all race a
- * fixed wall-clock budget, and reports each child's loop count plus the
- * implied CPU-share ratio. This lets us verify F3/F4 numerically (not
- * just by eye-balling finish order in Test 3).
+ * Spawns N children at different priorities, races them for a fixed
+ * wall-clock window, and reports each child's loop count (the CPU it won)
+ * as BOTH a human "share %" table and machine-parseable CFSBENCH lines that
+ * tools/bench_report.py turns into the report table/curve. This unifies the
+ * former cfs_share (fixed 3-priority race) and cfs_bench (full user-range
+ * sweep) into one program — they were otherwise the same fork/spin/pipe race.
+ *
+ * Usage:
+ *   cfs_share                       # default: 3 kids {1,10,19}, 200 ticks
+ *   cfs_share <ticks> <prio> ...    # sweep arbitrary user-class priorities
+ *     e.g. cfs_share 150 0 4 8 12 16 19
  *
  * Recommended invocation: smp=1 (so cores don't trivially absorb every
- * runnable child). Try `make qemu CPUS=1` and run `cfs_share`.
+ * runnable child). Try `make qemu CPUS=1` and run `cfs_share`, or let
+ * tools/bench_report.py drive it head-less.
  *
- * Output example:
- *   prio=1 count=4123456 share=63%
- *   prio=10 count=1320120 share=20%
- *   prio=19 count=991111 share=15%
+ * Output:
+ *   CFSBENCH start nkids=6 ticks=150
+ *   CFSBENCH prio=0 count=12345678
+ *   ...
+ *   CFSBENCH DONE
+ *   cfs_share results:
+ *     prio=0 count=12345678 share=42%
+ *   (total=... iterations)
+ *
+ * NOTE: only non-negative (user-class) priorities — a user-class process may
+ * not grant itself kernel-class (negative) priority, so negatives are rejected.
  */
 #include "kernel/types.h"
 #include "kernel/stat.h"
 #include "user/user.h"
 
-#define DURATION_TICKS 200          // wall-clock window per run (10ms tick @ xv6)
-#define NKIDS          3            // number of priority levels we race
+#define MAXKIDS        16           // pipe-deadlock-safe ceiling (see wait note)
+#define DEF_TICKS      200          // wall-clock window per run (10ms tick @ xv6)
 
-/* Priorities we want to compare. Edit freely. Mixing kernel-class
- * (negative) values requires running this binary itself as kernel-class,
- * which user shells cannot do — so we stick to user range here. */
-static const int prios[NKIDS] = { 1, 10, 19 };
+// Default race when invoked with no args (preserves the original cfs_share).
+static const int default_prios[] = { 1, 10, 19 };
+#define DEF_NKIDS ((int)(sizeof(default_prios)/sizeof(default_prios[0])))
 
 int
 main(int argc, char *argv[])
 {
+  int prios[MAXKIDS];
+  int nkids, ticks;
+
+  if(argc <= 1){
+    nkids = DEF_NKIDS;
+    ticks = DEF_TICKS;
+    for(int i = 0; i < nkids; i++)
+      prios[i] = default_prios[i];
+  } else {
+    ticks = atoi(argv[1]);
+    if(ticks <= 0)
+      ticks = DEF_TICKS;
+    nkids = 0;
+    for(int i = 2; i < argc && nkids < MAXKIDS; i++){
+      int pr = atoi(argv[i]);
+      if(pr < 0){                   // user-class only; negatives would be denied
+        printf("cfs_share: skipping kernel-class priority %d\n", pr);
+        continue;
+      }
+      prios[nkids++] = pr;
+    }
+    if(nkids == 0){
+      printf("cfs_share: usage: cfs_share <ticks> <prio>...\n");
+      exit(1);
+    }
+  }
+
   int p[2];
   if(pipe(p) < 0){
     printf("cfs_share: pipe failed\n");
@@ -36,9 +77,10 @@ main(int argc, char *argv[])
   }
 
   printf("cfs_share: racing %d children for %d ticks (smp=1 recommended)\n",
-         NKIDS, DURATION_TICKS);
+         nkids, ticks);
+  printf("CFSBENCH start nkids=%d ticks=%d\n", nkids, ticks);
 
-  for(int i = 0; i < NKIDS; i++){
+  for(int i = 0; i < nkids; i++){
     int pid = fork();
     if(pid < 0){
       printf("cfs_share: fork failed\n");
@@ -50,9 +92,9 @@ main(int argc, char *argv[])
 
       /* Spin until our budget expires. Each child reads its own start
        * tick after fork — they're a few ticks apart at most, which is
-       * negligible vs DURATION_TICKS. */
+       * negligible vs the window. */
       uint start = uptime();
-      uint deadline = start + DURATION_TICKS;
+      uint deadline = start + ticks;
       volatile uint count = 0;
       while(uptime() < deadline){
         for(int k = 0; k < 1000; k++)
@@ -69,10 +111,10 @@ main(int argc, char *argv[])
 
   /* Wait for all children before reading so we can size the report by
    * total iterations (for the share-% column). This is only safe while
-   * NKIDS * max_line_bytes (~14) stays under PIPESIZE (512): otherwise a
-   * writer would block on a full pipe while we block in wait() -> deadlock.
-   * If you bump NKIDS past ~30, read concurrently with wait() instead. */
-  for(int i = 0; i < NKIDS; i++){
+   * nkids * max_line_bytes (~14) stays under PIPESIZE (512): MAXKIDS=16
+   * keeps us well under. If you raise MAXKIDS past ~30, read concurrently
+   * with wait() instead, or a writer blocks on a full pipe -> deadlock. */
+  for(int i = 0; i < nkids; i++){
     int st;
     wait(&st);
   }
@@ -86,16 +128,16 @@ main(int argc, char *argv[])
   close(p[0]);
   all[got] = 0;
 
-  /* First pass: sum totals so we can compute %. */
-  struct { int prio; uint count; } rows[NKIDS];
+  /* First pass: parse "prio:count\n" rows and sum totals so we can compute %.
+   * Order-independent — children may report in any order. */
+  struct { int prio; uint count; } rows[MAXKIDS];
   int nrows = 0;
   char *s = all;
-  while(*s && nrows < NKIDS){
-    int neg = 0;
-    if(*s == '-'){ neg = 1; s++; }
+  while(*s && nrows < nkids){
+    // Children only ever report non-negative (user-class) priorities, so the
+    // readback is a plain "prio:count" scan — no sign to parse.
     int prio = 0;
     while(*s >= '0' && *s <= '9'){ prio = prio*10 + (*s - '0'); s++; }
-    if(neg) prio = -prio;
     if(*s != ':') break;
     s++;
     uint count = 0;
@@ -107,9 +149,16 @@ main(int argc, char *argv[])
     nrows++;
   }
 
-  if(nrows != NKIDS)
-    printf("cfs_share: warning: parsed %d of %d rows\n", nrows, NKIDS);
+  if(nrows != nkids)
+    printf("cfs_share: warning: parsed %d of %d rows\n", nrows, nkids);
 
+  /* Machine-parseable rows for tools/bench_report.py (one CFSBENCH line each). */
+  for(int i = 0; i < nrows; i++)
+    printf("CFSBENCH prio=%d count=%u\n", rows[i].prio, rows[i].count);
+  printf("CFSBENCH DONE\n");
+
+  /* Human-readable share table (also keeps the "cfs_share" token the
+   * ralph_battery S4 check looks for). */
   printf("\ncfs_share results:\n");
   for(int i = 0; i < nrows; i++){
     int pct = total ? (int)((uint64)rows[i].count * 100 / total) : 0;
