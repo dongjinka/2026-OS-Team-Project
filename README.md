@@ -350,9 +350,16 @@ Deep, code-referenced detail: [Implementation.md](Implementation.md).
 - **F6 (JSON deserialization)** runs on the host (`agent.py`); the kernel only accepts a
   validated minimal `REQ|<CMD>|<arg>` format. Rationale (kernel safety, no float/heap in
   xv6, layer separation) is in the report — a deliberate departure from the proposal wording.
-- **Security follow-up** — red-team findings #1·#3·#4 are fixed; **#2** (cache `/cache.bin`
-  resolving through the jail) and **#5** (deny-list default not covering `SPAWN`) are open.
-  See [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md) and the full audit
+- **Security follow-up** — first-pass findings #1·#3·#4 are fixed. A **second, full-codebase
+  audit (2026-06-09)** then found and fixed three more in previously-unchanged code: a
+  **deny-list bypass** where the `LLM_RESP` / `ASK` cache-hit forward paths reached `agentd`
+  without the deny check (#10, fixed by moving the deny check into the single
+  `forward_wire_to_agentd` chokepoint), **cache-value wire-line forgery** via an embedded
+  newline in a planted value (#11, fixed by sanitizing control bytes at the source in
+  `cache_set`/`disk_scan`), and a **re-jail inode-ref leak** (#12). Still open: **#2** (cache
+  `/cache.bin` resolving through the jail — only the forged-record-feedback half is now
+  mitigated by #11) and **#5** (deny-list default not covering `SPAWN`). See
+  [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md) and the full audit
   [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 - **SMP** — `make qemu-agent` runs single-core to avoid a known kernelvec trap-entry race
   (`scause=0xf`); shell mode (`make qemu`) boots with smp>1.

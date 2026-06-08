@@ -360,7 +360,11 @@ def wire_for(tool: str, args: dict):
         if tool == "help":  return "HELP|"
         if tool == "chat":  return f"CHAT|{_wire_escape(args.get('msg',''))}"
         if tool == "read":  return f"READ|{_wire_escape(args['file'])}"
-        if tool == "write": return f"WRITE|{_wire_escape(args['file'])}:{_wire_escape(args.get('text',''))}"
+        if tool == "write":
+            wf = str(args['file'])
+            if ':' in wf:       # ':' delimits <file>:<text> on the wire; a path
+                return None     # containing ':' would mis-split the field in agentd
+            return f"WRITE|{_wire_escape(wf)}:{_wire_escape(args.get('text',''))}"
         if tool == "print": return f"PRINT|{_wire_escape(args.get('msg',''))}"
         if tool == "nice":  return f"NICE|{int(args['pid'])}:{int(args['priority'])}"
         if tool == "spawn":

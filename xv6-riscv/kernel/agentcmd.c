@@ -230,10 +230,28 @@ forward_to_agentd(const char *line)
 static void
 forward_wire_to_agentd(const char *wire)
 {
+  // F7 single chokepoint. EVERY path that hands a wire to agentd funnels
+  // through here: the normal command path AND the ASK / LLM_RESP / semantic
+  // cache-hit paths. Enforce the deny list here (not only in
+  // agent_dispatch_now) so a denied command (e.g. an admin-added WRITE/SPAWN)
+  // cannot be laundered past F7 via the meta-command forwards — handle_ask's
+  // exact-hit and handle_llm_resp previously skipped the deny check entirely.
+  char cmd[DENY_NAMELEN];
+  int n = 0;
+  while(wire[n] && wire[n] != '|' && n < DENY_NAMELEN - 1){ cmd[n] = wire[n]; n++; }
+  cmd[n] = 0;
+  if(deny_listed(cmd)){
+    printf("[agent] DENY '%s' (sandboxed: never reaches the agent)\n", cmd);
+    return;
+  }
+
   char buf[AGENTQ_LEN];
   int i = 0;
   buf[i++] = 'R'; buf[i++] = 'E'; buf[i++] = 'Q'; buf[i++] = '|';
-  for(int j = 0; wire[j] && i < AGENTQ_LEN - 1; j++)
+  // Stop at a control byte: a value planted in the user-writable /cache.bin and
+  // replayed via ASK could embed a newline that would otherwise forge a second
+  // queued command line. Wire fields are single-line by construction.
+  for(int j = 0; wire[j] && wire[j] != '\n' && wire[j] != '\r' && i < AGENTQ_LEN - 1; j++)
     buf[i++] = wire[j];
   buf[i] = 0;
   forward_to_agentd(buf);
@@ -277,7 +295,7 @@ handle_ask(char *arg)
   int plen = 0; while(arg[plen]) plen++;
   if(plen == 0) return;
 
-  char cached[1025];   // CACHE_VAL (1024) + NUL
+  char cached[CACHE_VAL + 1];   // value cap + room for the NUL terminator
 
   // 1) exact cache hit — forward the cached wire to agentd, skip the LLM.
   int clen = cache_get_exact(arg, plen, cached, sizeof(cached) - 1);
@@ -346,7 +364,7 @@ handle_cache_get(char *arg)
 {
   int klen = 0; while(arg[klen]) klen++;
   if(klen == 0){ printf("RESP|MISS\n"); return; }
-  char valbuf[1025];   // CACHE_VAL (1024) + room for the NUL terminator
+  char valbuf[CACHE_VAL + 1];   // value cap + room for the NUL terminator
   int vlen = cache_get(arg, klen, valbuf, sizeof(valbuf) - 1);
   if(vlen < 0){
     printf("RESP|MISS\n");

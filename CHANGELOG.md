@@ -36,8 +36,27 @@
   를 이 모듈 사용으로 재작성(3중 복붙 제거, `with` 컨텍스트 매니저 채택).
 - **agent.py** — `_wrap_display` 하드브레이크를 글자마다 prefix를 재측정하던
   O(n²)에서 표시 폭을 증분 추적하는 단일 선형 패스로 개선.
+- **kernel/param.h · cache.c · agentcmd.c** — 캐시값 크기 `CACHE_VAL(1024)`을
+  `param.h` 공유 상수로 승격(기존 `cache.c` 로컬 정의 제거). agentcmd.c의 HIT 버퍼는
+  `valbuf[CACHE_VAL+1]` / `cache_get(..., sizeof-1)`로 단일 소스화 — 매직넘버 드리프트 제거.
+- **tools/bench_report.py** — 모듈-레벨 `info()`를 `QemuHarness.info`(동일 `[bench]`→stderr)로
+  통일해 중복 제거.
 - 문서(README·README.ko·docs/BENCHMARKS·docs/SECURITY_AND_EVALUATION·
   docs/assets/README)의 `cfs_bench` 참조를 `cfs_share`로 갱신.
+
+### Security (2026-06-09 — server3342)
+2차 **전체-코드 감사**(diff 아닌 코드베이스 전체 sweep)에서 미변경 기존 코드의
+취약점을 발견·수정. 상세는 [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) §2-2(#10–#13).
+- **deny-list 우회 (#10, HIGH)** — `handle_llm_resp`·`handle_ask` 정확-캐시-히트가
+  `forward_wire_to_agentd`를 deny 검사 없이 호출해 `REQ|LLM_RESP|<cmd>` / `CACHE_SET`→`ASK`
+  재생으로 deny된 명령이 agentd 도달. deny 검사를 `forward_wire_to_agentd` **단일
+  chokepoint**로 이동해 모든 포워딩 경로를 일원 검사.
+- **캐시값 wire 라인 위조 (#11, HIGH)** — 심은 캐시값의 개행이 `RESP|HIT` printf /
+  agentd 포워딩에서 그대로 방출돼 두 번째 라인 위조. `cache_set`·`disk_scan`에서
+  제어문자를 출처 정화 + chokepoint에서 `\n`/`\r` 차단(이중 방어).
+- **재-jail inode ref 누수 (#12, LOW)** — `sys_jail`이 재할당 전 이전 `jail_root`를 `iput`.
+- **WRITE 파일명 `:` 오분할 (#13, LOW)** — `agent.py wire_for`가 `:` 포함 파일명을 거부.
+- 회귀 무영향 검증: `ralph_battery` 26/26 · `sec_audit` SAFE/SAFE · 캐시 50% hit · 빌드 clean.
 
 ### Removed (2026-06-09 — server3342)
 - **user/cfs_bench.c** — 파라미터화된 `cfs_share.c`로 통합되어 삭제(Makefile

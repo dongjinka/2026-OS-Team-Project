@@ -30,7 +30,8 @@
 #include "file.h"
 
 #define CACHE_SLOTS    16
-#define CACHE_VAL      1024
+// CACHE_VAL (max value bytes) lives in param.h — shared with agentcmd.c's
+// RESP|HIT buffer so the size cannot drift between the two files.
 #define DISK_MAX_BYTES (4 * 1024 * 1024)  // /cache.bin 상한 4 MB
 
 // MinHash + Jaccard 파라미터
@@ -209,6 +210,12 @@ disk_scan(uint64 hash, char *valbuf, int vbuflen)
       int vlen = (rec_buf.vlen > CACHE_VAL) ? CACHE_VAL : rec_buf.vlen;
       int n = (vlen < vbuflen) ? vlen : vbuflen;
       memmove(valbuf, rec_buf.val, n);
+      // /cache.bin is user-writable, so a planted record's value is untrusted
+      // bytes. Neutralize embedded control chars (notably '\n'/'\r') so a
+      // poisoned value cannot forge extra wire lines when it is later emitted
+      // (RESP|HIT) or forwarded to agentd. Legitimate wire values are printable.
+      for(int b = 0; b < n; b++)
+        if((unsigned char)valbuf[b] < 0x20) valbuf[b] = ' ';
       found = vlen;
       break;
     }
@@ -296,6 +303,13 @@ cache_set(const char *key, int klen, const char *val, int vlen)
   cache_ram[i].vlen = (ushort)vlen;
   cache_ram[i].last_access = ticks;
   memmove(cache_ram[i].val, val, vlen);
+  // Cache values are single-line wire text. Neutralize any embedded control
+  // byte (notably '\n') at store time so no emission path — handle_cache_get's
+  // RESP|HIT printf or an agentd forward — can be tricked into forging an extra
+  // wire line from a value planted via set_cache. (disk_scan does the same for
+  // disk-origin values; doing it here covers the RAM path at the source.)
+  for(int b = 0; b < vlen; b++)
+    if((unsigned char)cache_ram[i].val[b] < 0x20) cache_ram[i].val[b] = ' ';
   // signature 를 슬롯에 직접 작성 — stack 임시 K-array 회피해 frame 절약.
   int ns = build_signature(key, klen, cache_ram[i].sig);
   cache_ram[i].has_sig = (ns > 0) ? 1 : 0;

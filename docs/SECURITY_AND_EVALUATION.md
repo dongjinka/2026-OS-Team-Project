@@ -40,6 +40,14 @@ present) or `SAFE` (fixed). **#1, #3, and #4 are now patched** on the current
 review PR #13/#14 — also on `main`; #4's read/write-filename part via our `agent.py`
 fix), so the reproducers below report `SAFE` on it.
 
+> **Second audit (2026-06-09).** A follow-up full-codebase sweep (not diff-scoped)
+> found and fixed three more issues in previously-unchanged code — a deny-list
+> bypass through the `LLM_RESP` / `ASK` cache-hit forward paths (#10), cache-value
+> wire-line forgery via an embedded newline (#11), and a re-jail inode-ref leak
+> (#12). These were confirmed by code trace and regression (`ralph_battery` 26/26,
+> `sec_audit` SAFE/SAFE, cache 50% hit), not by a dedicated reproducer yet. Full
+> write-up in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) §2-2.
+
 | # | Severity | Vulnerability | Reproducer |
 |---|---|---|---|
 | 1 | High | A jailed agent self-approves its own confirm-escape gate | `tools/sec_audit.py` (`secconfirm`) |

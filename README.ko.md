@@ -337,8 +337,13 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 - **F6 (JSON 역직렬화)** 는 호스트(`agent.py`)에서 수행한다. 커널은 검증된 최소
   `REQ|<CMD>|<arg>` 형식만 받는다. 근거(커널 안전, xv6의 부동소수점·힙 부재, 레이어 분리)는
   보고서에 — 제안서 문구로부터의 의도적 이탈이다.
-- **보안 후속** — 레드팀 #1·#3·#4는 수정 완료, **#2**(캐시 `/cache.bin`의 jail 해석) ·
-  **#5**(거부 목록 기본값이 `SPAWN` 미커버)는 오픈. [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md)
+- **보안 후속** — 1차 #1·#3·#4 수정 완료. **2차 전체-코드 감사(2026-06-09)**에서
+  미변경 기존 코드의 3건을 추가 발견·수정: **deny-list 우회**(`LLM_RESP`/`ASK` 캐시-히트
+  포워딩이 deny 검사 없이 `agentd` 도달 → #10, deny 검사를 `forward_wire_to_agentd`
+  단일 chokepoint로 일원화), **캐시값 wire 라인 위조**(심은 값의 개행 주입 → #11,
+  `cache_set`/`disk_scan` 출처 정화), **재-jail inode ref 누수**(#12). 오픈: **#2**(캐시
+  `/cache.bin`의 jail 해석 — 위조-되먹임 절반만 #11로 완화) · **#5**(거부 목록 기본값이
+  `SPAWN` 미커버). [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md)
   와 전체 감사 [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) 참조.
 - **SMP** — `make qemu-agent`는 알려진 kernelvec 트랩 진입 race(`scause=0xf`)를 피해
   단일 코어로 돈다. 셸 모드(`make qemu`)는 smp>1로 부팅.

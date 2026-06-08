@@ -28,7 +28,7 @@ confirm-escape·F9 캐시·호스트 브릿지)를 대상으로 한 보안/버�
 | # | 심각도 | 문제 | 위치 | 수정위험 | 상태 |
 |---|---|---|---|---|---|
 | 1 | HIGH | jailed agent가 `sys_dispatch`로 `CONFIRM_RES`를 보내 자기 위험 syscall(exec/kill/mknod)을 호스트 동의 없이 self-승인 | `sysproc.c`(sys_dispatch), `agentcmd.c`, `confirm.c` | 낮음 | **고정됨** (PR#13, `sys_dispatch` is_agent 거부) |
-| 2 | HIGH | `/cache.bin`이 jailed 컨텍스트에서 chroot로 resolve → 캐시 split-brain + agentd가 위조 레코드를 호스트에 되먹임 | `cache.c`(disk_scan/append), `fs.c`(namex) | 낮음 | **라이브** (미수정) |
+| 2 | HIGH | `/cache.bin`이 jailed 컨텍스트에서 chroot로 resolve → 캐시 split-brain + agentd가 위조 레코드를 호스트에 되먹임 | `cache.c`(disk_scan/append), `fs.c`(namex) | 낮음 | **부분완화** (위조-되먹임은 #11 캐시값 제어문자 정화로 차단; jail-root split-brain 자체는 미수정) |
 | 3 | MEDIUM | jailed agent의 `NICE`가 임의 user-class 프로세스 우선순위 변경(스케줄링 DoS) — self 제한 없음 | `sysproc.c`(sys_setpriority) | 낮음 | **고정됨** (PR#13, is_agent self-only 가드) |
 | 4 | MEDIUM | 와이어 주입 — `read/write` 파일명·`spawn` argv가 `_wire_escape` 우회 → 개행으로 두 번째 `REQ\|` 위조 | `agent.py`(wire_for) | 낮음 | **고정됨** (spawn=PR / read·write 파일명=우리 agent.py) |
 | 5 | MEDIUM | deny-list 기본값 `{KILL,EXEC}`가 실제 exec 표면인 SPAWN을 못 막음(운영자 기만) | `agentcmd.c`(deny_default), `agentd.c` | 낮음(문서) | **라이브** (백로그) |
@@ -38,6 +38,44 @@ confirm-escape·F9 캐시·호스트 브릿지)를 대상으로 한 보안/버�
 | 9 | LOW | stage-1 intake ring(8슬롯) 가득 시 무진단 silent drop | `agentcmd.c`(agent_dispatch) | 낮음 | 보류 |
 
 > **추가 수정(우리 기여, 감사 #1–9 외)**: smp>1에서 캐시 `RESP\|HIT` 콘솔 인터리브 → 캐시 미스 회귀 → `handle_cache_get` 단일 printf 원자화로 고정. `make qemu-agent`를 smp=1로 고정해 선재 kernelvec SMP race(캐시 패닉) 회피.
+
+---
+
+## 2-2. 2차 감사 (2026-06-09 — 전체 코드 재검증)
+
+1차 감사가 **변경분(diff) 중심**이었던 한계를 보완해, 프로젝트 커스텀 코드 전체를
+서브시스템별 병렬 에이전트로 다시 sweep했다. **미변경 기존 코드**에서 신규 발견
+3건(HIGH 2 + LOW 1)과 호스트측 LOW 1건을 확정했고, 전부 같은 패스에서 수정·
+회귀 검증(`ralph_battery` 26/26, `sec_audit` SAFE/SAFE, 캐시 50% hit)했다.
+
+| # | 심각도 | 문제 | 위치 | 상태 |
+|---|---|---|---|---|
+| 10 | HIGH | **deny-list 우회 (메타 포워딩 경로)** — `handle_llm_resp`·`handle_ask` 정확-캐시-히트가 `forward_wire_to_agentd`를 **deny-list 검사 없이** 호출. 메타 명령은 deny 검사(`agent_dispatch_now`)보다 앞에서 `return`하므로, 신뢰 불가 와이어 `REQ\|LLM_RESP\|<cmd>\|...` 또는 `CACHE_SET`→`ASK` 재생으로 deny된 명령(예: 운영자가 추가한 `WRITE`/`SPAWN`)이 agentd에 도달 | `agentcmd.c`(handle_ask/handle_llm_resp/forward_wire_to_agentd) | **고정됨** |
+| 11 | HIGH | **캐시값 → wire 라인 위조 (개행 주입)** — user-writable `/cache.bin`에 심거나 ungated `set_cache`로 RAM에 심은 **개행 포함 값**이 `handle_cache_get`의 `RESP\|HIT\|%s` printf와 agentd 포워딩에서 그대로 방출 → 두 번째 와이어 라인 위조(커널→호스트 / 커널→agentd) | `cache.c`(disk_scan/cache_set), `agentcmd.c` | **고정됨** |
+| 12 | LOW | **재-jail inode ref 누수** — `jail()`이 `agent_blocked` 비대상이라 재호출 가능. `sys_jail`이 이전 `p->jail_root`를 `iput` 없이 덮어써 호출마다 inode ref 누수(탈옥 아님) | `sysfile.c`(sys_jail) | **고정됨** |
+| 13 | LOW | **WRITE 파일명 `:` 오분할** — `wire_for`의 `WRITE\|<file>:<text>`에서 파일명에 `:`이 있으면 agentd가 첫 `:`로 오분할(LLM이 양 필드 제어 → 권한 교차 아님, 무결성 버그) | `agent.py`(wire_for) | **고정됨** |
+
+### #10 — deny-list 우회 (메타 포워딩 경로) (HIGH)
+agentd로 가는 모든 enqueue는 `forward_wire_to_agentd`(단일 chokepoint)를 거치지만,
+deny-list 검사는 `agent_dispatch_now`의 정상 경로에만 있었다. `ASK` 정확-히트
+(`handle_ask`)와 `LLM_RESP`(`handle_llm_resp`)는 메타 명령으로 라우팅돼 deny 검사
+**앞에서** `forward_wire_to_agentd`를 직접 호출 → F7 deny-list를 우회. 바로 아래
+semantic-hit 경로가 `CHAT\|`/`PRINT\|` 접두로 제한된 것이, 작성자도 이 불변식을
+의도했으나 정확-히트/LLM_RESP 경로엔 누락됐음을 방증한다.
+- 수정: deny-list 검사(+개행 차단)를 `forward_wire_to_agentd` chokepoint로 일원화 →
+  모든 포워딩 경로가 동일하게 검사. 기본 deny-list가 `{KILL,EXEC}`라 정상 흐름 무영향
+  (`ralph_battery` 26/26·캐시 50% hit 확인).
+
+### #11 — 캐시값 wire 라인 위조 (HIGH)
+캐시값은 "단일 라인 와이어 텍스트"라는 가정 하에 방출되나, 이를 강제하는 곳이
+없었다. `/cache.bin`은 user-writable(감사 #2)이고 `set_cache`/`get_cache` syscall엔
+`is_agent` 게이트가 없어, 개행 포함 값을 심으면 `RESP\|HIT\|%s`(개행 미차단 sink)나
+agentd 포워딩에서 두 번째 라인이 위조된다.
+- 수정: 값을 **출처에서 정화** — `disk_scan`(디스크 출처)·`cache_set`(RAM 출처)에서
+  제어문자(<0x20)를 공백으로 치환. 추가로 `forward_wire_to_agentd`에서 `\n`/`\r`
+  복사 중단(이중 방어). 감사 #2의 "위조 레코드 되먹임" 절반을 차단(jail-root
+  split-brain 자체는 #2로 잔존). `set_cache`/`get_cache`의 `is_agent` 게이트 부재는
+  값 정화 이후 **하드닝 갭**(구체 취약점 아님)으로 백로그.
 
 ---
 
@@ -120,3 +158,6 @@ SMP 패닉을 회피하기 위함 — 여기서 패닉이 보이면 진짜 문�
 `CASES`로 확장한다.
 
 현재 재현 커버리지: #1(confirm self-승인) · #3(NICE 권한상승) · #4(와이어 주입).
+2차 감사 발견 #10–#13은 전체-코드 sweep + 적대적 코드 트레이스로 확정하고 회귀
+(`ralph_battery` 26/26 · `sec_audit` SAFE/SAFE · 캐시 50% hit)로 무영향을 검증했다 —
+전용 `VULNERABLE`/`SAFE` 재현기는 아직 없다(후속 작업).

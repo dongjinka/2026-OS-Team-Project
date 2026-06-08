@@ -12,4 +12,5 @@
 #define FSSIZE       2000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
 #define USERSTACK    1     // user stack pages
+#define CACHE_VAL    1024  // max bytes of a cached LLM-response value (cache.c, agentcmd.c)
 
