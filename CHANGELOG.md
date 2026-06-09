@@ -14,6 +14,19 @@
 
 ## [Unreleased]
 
+### Docs (2026-06-09 — server3342)
+- **문서 정리/통합** — `docs/SECURITY_AND_EVALUATION.md`(EN)와 `docs/SECURITY_AUDIT.md`(KR)를
+  단일 [`docs/SECURITY.md`](docs/SECURITY.md)(§1 EN 개요 + §2 KR 전체 발견 등록부 #1–#9)로 병합;
+  평가 수치는 이미 `docs/BENCHMARKS.md`에 있어 중복 제거. `Weekly_Development_Process.md`는
+  `docs/Development_Process.md` §3·§5가 EN으로 전부 커버하므로 삭제. `plan.md`는 2026-05-18
+  스냅샷으로 아카이브 헤더 표기. 모든 교차참조/인덱스(`docs/README.md`)를 갱신.
+- **CLAUDE.md** (신규) — Claude Code용 저장소 가이드(빌드·실행·테스트·에이전트 명령 경로·핵심 파일).
+- **docs/UNIT_IO_MATRIX.md** (신규) — 에이전트 명령 경로 단위기능별 입력→기대출력→
+  검증 하네스 매트릭스.
+- **문서 사실 정합성 패스** — 코드/git 히스토리 대조로 문서의 file:line·수치 불일치를 정정:
+  semantic 임계 0.40, confirm 타임아웃 15초(150 ticks), CFS 가중치 역비례 식, agentd 도구 11종,
+  `eab475d` 날짜 2026-05-11, 부재 브랜치/`README.en.md` 참조 정정 등.
+
 ### Added (2026-06-08 — June)
 - **데모 캡처 8장** `docs/assets/`에 추가 — 모두 `solar-pro2` 라이브
   agent-mode 세션 실제 출력:
@@ -296,8 +309,8 @@
 
 이전 커밋들은 `git log --oneline`으로 조회. 주요 마일스톤:
 
-- `eab475d` (2026-04) docs: 코스 요구사항 문서 추가
-- `08157c9` chore: 주간 개발 진행 사항 업데이트
+- `eab475d` (2026-05-11) docs: 코스 요구사항 문서 추가
+- `08157c9` (2026-05-11) chore: 주간 개발 진행 사항 업데이트
 - 그 외 초기 셋업 커밋들
 
 ---
