@@ -371,10 +371,10 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 
 | 멤버 | 역할 (git 이력 기준) |
 | --- | --- |
-| Se-Joong Kim | xv6 통합, 스케줄러 기반, jail/샌드박스 재작성, F9 캐시, 회귀 하네스 |
-| SeungBeom Kim | 핵심 기능: CFS, 샌드박싱, `agentd`, `agent.py` 루프, 보안 가드, PS/HELP |
-| June Kong | 평가 자동화(`cfs_share`, Test 3), 문서, 설계 결정 |
-| Dongjin Ka | 저장소 / 리뷰 |
+| Se-Joong Kim (김세중, `Se-Joong-Kim` / `Se-Joong_Kim`) | xv6 통합, 스케줄러 기반, jail/샌드박스 재작성, F9 캐시, 회귀 하네스, confirm-escape v1 → v2, `spawn` + `populate_jail` |
+| SeungBeom Kim (김승범, `server3342`) | 핵심 기능: CFS, 샌드박싱, `agentd`, `agent.py` 루프, 보안 가드, PS/HELP, audit fix (PR #13), 문서 정합 (PR #17/#18) |
+| June Kong (공성준, `SJ-Kong` / `June Kong`) | 평가 자동화(`cfs_share`, Test 3), 문서(Implementation.md, CHANGELOG, 영문 산출물), F6 결정, 06-08 데모 캡처 + 06-09 데모 비디오 + 정확성 검토 |
+| Dongjin Ka (가동진, `dongjinka` — 저장소 소유자) | 저장소 / 리뷰; 06-04 적대적 보안 감사; PR #15 (README EN-primary 재구축, agent.py 언어 매칭, 커널 스택 4 KB → 32 KB) |
 
 > 역할은 git 이력에서 추론한 것 — 실제와 다르면 수정 바람.
 

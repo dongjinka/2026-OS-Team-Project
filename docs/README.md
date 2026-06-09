@@ -18,7 +18,8 @@ This folder holds the detailed reports and the security/evaluation evidence.
 |---|---|---|
 | Security audit & fixes | [`SECURITY.md`](SECURITY.md) §1 — EN overview | [`SECURITY.md`](SECURITY.md) §2 — full finding register #1–#9 (KR) |
 | Quantitative benchmarks | [`BENCHMARKS.md`](BENCHMARKS.md) — raw CFS / cache numbers | `Technical_Report.md` §2 / §6 — method |
-| Demo media | [`assets/README.md`](assets/README.md) — index of the 8 PNG captures inlined by the root READMEs / Technical Report | `assets/*.png` — `solar-pro2` live runs (2026-06-08) |
+| Unit-IO verification matrix | [`UNIT_IO_MATRIX.md`](UNIT_IO_MATRIX.md) — agent command-path unit-functions × expected I/O × harness mapping (U1–Un, ✅ verified rows only) | `tools/ralph_*.py`, `tools/sec_audit.py`, `cache_test` — the harnesses each row cites |
+| Demo media | [`assets/README.md`](assets/README.md) — index of the 8 PNG captures inlined by the root READMEs / Technical Report + Google Drive end-to-end video | `assets/*.png` — `solar-pro2` live runs (2026-06-08) |
 
 Reproduce the above with the red-team harnesses (`tools/sec_audit.py`,
 `tools/sec_wire.py`) and the benchmark harness (`tools/bench_report.py`).

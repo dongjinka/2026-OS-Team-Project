@@ -14,6 +14,33 @@
 
 ## [Unreleased]
 
+### Changed (2026-06-09 — June, 팀원 git author 변형 병기 + 누락 작업 보완)
+- **`README.md` / `README.ko.md` §11 Team 표** — 각 멤버 행에 한글 이름 +
+  git author nickname 병기:
+  Se-Joong Kim (김세중, `Se-Joong-Kim` / `Se-Joong_Kim`),
+  SeungBeom Kim (김승범, `server3342`),
+  June Kong (공성준, `SJ-Kong` / `June Kong`),
+  Dongjin Ka (가동진, `dongjinka` — repo owner).
+  각 멤버의 주요 작업도 같이 보강(SeungBeom audit fix PR #13 + 문서 정합 PR
+  #17/#18, June 06-04~06-09 작업, Dongjin PR #15 README 재구축 + 32KB stack).
+- **`docs/Development_Process.md` §1 Roles** — June 행에 누락됐던
+  **`e8ac26b` (2026-06-04) Technical Report + Development Process 재정합**
+  작업(confirm-escape v2 / `spawn` / ralph 65/65 / 06-04 audit 반영) 추가 +
+  email 두 개(`june020110@gmail.com` / `steady11317@gmail.com`)도 병기 —
+  git author 변형이 둘인 사실이 추적 가능하도록.
+- **한글 이름 정정 (4인 확정)** — README EN/KO 팀 표 + Dev Process §1 Roles +
+  CHANGELOG에서 잘못 추측됐던 *"강동진"*을 **가동진** (Ka = 한국어 성씨 "가",
+  not "강")으로, 그동안 *"성준"*으로만 적혔던 June을 **공성준**으로 정정.
+  Se-Joong = 김세중, SeungBeom = 김승범은 기존 표기 그대로 유지.
+- **`docs/Development_Process.md` §1 Workflow** — "PR #1–#10 over the project"
+  표현을 **"PR #1–#18 over the project"** 로 정확성 갱신. PR #12(영문 산출물),
+  #13/#14(audit fixes), #15(06-05 README/kernel-stack), #17/#18(06-09 문서
+  통합)의 역할도 한 줄로 명시 — Workflow 표현이 main의 실제 PR 진행과 정합.
+- **`docs/README.md` 인덱스** — Security & Evaluation 표에 누락됐던
+  [`UNIT_IO_MATRIX.md`](docs/UNIT_IO_MATRIX.md) (에이전트 명령 경로 단위
+  기능별 입력→기대 출력 매트릭스) 행 추가 — 새 main 추가 검증 자료의 라우팅
+  복원.
+
 ### Added (2026-06-09 — June)
 - **End-to-end 데모 비디오 (Google Drive) 링크** — `README.md` §5 + `README.ko.md` §5
   헤더에 배너로 박음 + `docs/assets/README.md` 인덱스에도 외부 미디어로 표시.

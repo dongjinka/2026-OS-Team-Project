@@ -385,10 +385,10 @@ CHANGELOG).
 
 | Member | Focus (from git history) |
 | --- | --- |
-| Se-Joong Kim | xv6 integration, scheduler foundation, jail/sandbox rewrite, F9 cache, regression harness |
-| SeungBeom Kim | core features: CFS, sandboxing, `agentd`, `agent.py` loop, security guards, PS/HELP |
-| June Kong | evaluation automation (`cfs_share`, Test 3), documentation, design decisions |
-| Dongjin Ka | repository / review |
+| Se-Joong Kim (김세중, `Se-Joong-Kim` / `Se-Joong_Kim`) | xv6 integration, scheduler foundation, jail/sandbox rewrite, F9 cache, regression harness, confirm-escape v1 → v2, `spawn` + `populate_jail` |
+| SeungBeom Kim (김승범, `server3342`) | core features: CFS, sandboxing, `agentd`, `agent.py` loop, security guards, PS/HELP, audit fixes (PR #13), doc consolidation (PR #17/#18) |
+| June Kong (공성준, `SJ-Kong` / `June Kong`) | evaluation automation (`cfs_share`, Test 3), documentation (Implementation.md, CHANGELOG, English deliverables), F6 decision, 06-08 demo capture + 06-09 demo video + accuracy review |
+| Dongjin Ka (가동진, `dongjinka` — repo owner) | repository / review; 06-04 adversarial security audit; PR #15 (README EN-primary reconstruction, agent.py language matching, kernel stack 4 KB → 32 KB) |
 
 > Roles are inferred from git history — correct if inaccurate.
 
