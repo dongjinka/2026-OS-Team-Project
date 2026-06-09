@@ -539,7 +539,7 @@ LLM API 호출은 (1) 느리고(수 초) (2) 돈이 든다. 사용자가 같은 
 #### 7.2.3 FNV-1a 알고리즘 — 5줄짜리 함수
 
 본 프로젝트가 채택한 알고리즘은 **FNV-1a (Fowler–Noll–Vo, variant a)** 의
-64-bit 버전. [cache.c:58-68](xv6-riscv/kernel/cache.c) 에 그대로 구현되어 있다:
+64-bit 버전. [cache.c:80-89](xv6-riscv/kernel/cache.c) 에 그대로 구현되어 있다:
 
 ```c
 static uint64
@@ -647,7 +647,7 @@ fnv1a_64(const char *data, int len)
 #### 7.2.8 `h == 0 → 1` 트릭
 
 함수 마지막 줄 `return (h == 0) ? 1 : h;` 는 일견 부자연스럽다. 이유는 캐시 슬롯
-구조에 있다 ([cache.c:23-28](xv6-riscv/kernel/cache.c)):
+구조에 있다 ([cache.c:44-51](xv6-riscv/kernel/cache.c)):
 
 ```c
 struct cache_entry {
@@ -1050,7 +1050,7 @@ P(min_h(A) == min_h(B)) = |A ∩ B| / |A ∪ B| = J(A, B)
 본 프로젝트는 **K = 64** 채택 — 슬롯당 +512 byte (`uint64[64]`),
 σ(Jaccard) ≈ 0.125. K = 128 은 커널 스택 4 KB 한도를 초과한다 (§7.7.10).
 
-코드 [cache.c:98-117](xv6-riscv/kernel/cache.c):
+코드 [cache.c:144-176](xv6-riscv/kernel/cache.c):
 
 ```c
 build_signature(const char *key, int klen, uint64 out_sig[SIG_K])
@@ -1084,7 +1084,7 @@ LSH(Locality-Sensitive Hashing) 논문들이 표준으로 쓰는 트릭. shingle
 비용: FNV-1a 두 번 + K 회 산술. K=64 라도 약 200 ns.
 
 두 *진짜* 해시 `h_1`, `h_2` 는 같은 FNV-1a 를 **다른 offset basis** 로 두 번
-돌려서 만든다 ([cache.c:84-95](xv6-riscv/kernel/cache.c)):
+돌려서 만든다 ([cache.c:93-104](xv6-riscv/kernel/cache.c)):
 
 ```c
 fnv1a_64_pair(const char *s, int n, uint64 *h1, uint64 *h2)
@@ -1132,7 +1132,7 @@ match · 5    ≥  2  · 64  = 128
 만약 옛 응답이 `WRITE|/log.txt|...` 였고 새 paraphrase 가 의미 hit 으로
 그걸 그대로 실행해 버린다면? 사용자 의도와 다른 *부작용* (파일 덮어쓰기,
 프로세스 종료) 이 발생한다. 그래서 의미 hit 은 **부작용 없는 응답
-(`CHAT|...`, `PRINT|...`) 에만 적용** ([agentcmd.c:309-345](xv6-riscv/kernel/agentcmd.c)):
+(`CHAT|...`, `PRINT|...`) 에만 적용** ([agentcmd.c:292-305](xv6-riscv/kernel/agentcmd.c)):
 
 ```c
 clen = cache_get_semantic(arg, plen, cached, 1024, &score);
@@ -1171,7 +1171,7 @@ cache_get_semantic  (MinHash 64-D + Jaccard)      ← 새로 추가
 ```
 
 외부에서 부르는 `cache_get()` 은 두 단계를 자동으로 fallback 시키는 wrapper
-([cache.c:349-355](xv6-riscv/kernel/cache.c)) — 기존 호출자 (`sys_get_cache`,
+([cache.c:412-419](xv6-riscv/kernel/cache.c)) — 기존 호출자 (`sys_get_cache`,
 `handle_cache_get`) 는 코드 한 줄도 안 바뀜.
 
 #### 7.7.10 한계와 튜닝 여지
