@@ -365,10 +365,10 @@ deck-stage:not(:defined){visibility:hidden;}
   "Handoff beat (3-4s). Speaker 2 steps up on this slide.",
   "SPEAKER 2 · ~45s. So, what happens when several agents want the CPU at the same time? That's why we built a real CFS, a Completely Fair Scheduler, inside the kernel. Every timer tick, the running process is charged vruntime, weighted by its priority. The weights come from Linux's table, all forty-one of them, in integer math only, because xv6 has no floating point and no heap. To pick the next process, we scan for the lowest vruntime, just like the assignment asked. [Pace buffer: And a floor on vruntime means even the lowest priority always gets a turn.] So nothing ever starves. Next question: why would we trust this thing?",
   "Handoff beat (3-4s). Speaker 3 steps up on this slide.",
-  "SPEAKER 3 · ~35s. We don't. A human at the shell runs with full privilege. But every command the LLM issues runs inside a chroot jail, a locked folder it can't escape. And that's enforced by the kernel's code path, not by asking the model to behave. Three layers: a deny-list the agent can't edit, blocked syscalls like exec and kill, and the jail itself, which refuses any dot-dot that tries to climb out.",
+  "SPEAKER 3 · ~35s. We don't. A human at the shell runs with full privilege. But every command the LLM issues runs inside a chroot jail, a locked folder it can't escape. And that's enforced by the kernel's code path, not by asking the model to behave. Three layers: a deny-list the agent can't edit, blocked syscalls like exec and kill, and the jail itself, which refuses any dot-dot that tries to climb out. On the right you can see it: a file inside the box reads fine, but a read above the root, or an exec, comes back denied.",
   "SPEAKER 3 · ~25s. Building this taught us a real OS lesson. Serving a command can touch the disk and sleep. And sleeping inside an interrupt handler is illegal. So we split dispatch in two: the interrupt just queues the request, and a normal process drains it later, where sleeping is fine. Then: \"Now, watch it run.\"  [CONTINGENCY: if rehearsal runs over 4:00, SKIP THIS SLIDE first (right-click its thumbnail, then Skip) and fold the lesson into one sentence on the previous slide.]",
   "DEMO VIDEO · 1:00, played over this slide. SPEAKER 4 points sparsely, synced: \"This is our kernel, live. I ask a question, and it calls Solar once. That's a miss.\" / \"The same question again: cache HIT. Solar is never called. The cache is a sixteen-slot kernel table, backed by a file on disk.\" / \"Here, the jail blocks a read outside the agent's folder.\" / \"And a dangerous request with no answer: fifteen seconds, then denied by default.\"",
-  "SPEAKER 4 · ~30s. One more thing, because honesty counts. We attacked our own kernel. Twice. Those two audits fixed seven real issues, including three sandbox escapes. Two are still open. We name them in the repo, instead of rushing a risky fix. And through all of it, the sixty-five tests stayed green.",
+  "SPEAKER 4 · ~30s. So here's everything we shipped: the fair scheduler, the three-layer sandbox, the response cache, and the agent syscall interface — all running, with sixty-five out of sixty-five tests green and two security audits behind them. And honesty counts, so on the right are the limits we name openly: two known issues we chose not to rush, an O(n) scan that a real system would replace with a tree, and a single model endpoint. They're all tracked in the repo, not hidden.",
   "SPEAKER 4 · ~15s. So, one line to take away. We didn't run an LLM on an OS. We taught the OS to host the LLM, and every concept from this course is now something you can watch it do. Thank you."
 ]
 </script>
@@ -397,7 +397,6 @@ deck-stage:not(:defined){visibility:hidden;}
             <div class="m"><span class="mk">Team</span><span class="mv">Last of OS</span></div>
             <div class="m"><span class="mk">Members</span><span class="mv">김세중 · 김승범 · 공성준 · 가동진</span></div>
             <div class="m"><span class="mk">Direction</span><span class="mv">A — OS for LLM · xv6-riscv</span></div>
-            <div class="m"><span class="mk">Result</span><span class="mv">65 / 65 regression tests green</span></div>
           </div>
         </div>
         <div class="c-media media">
@@ -575,18 +574,29 @@ deck-stage:not(:defined){visibility:hidden;}
         <div class="hairline"></div>
       </div>
       <div class="body">
-        <div class="stack" style="flex:1;justify-content:center;max-width:1380px;width:100%;margin:0 auto;gap:26px;">
-          <div class="layer">
-            <div class="lnum">L1</div>
-            <div class="lbody"><div class="lt">Deny-list</div><div class="ls"><code>{KILL, EXEC}</code> — humans can extend it; the kernel rejects any edit from an agent process</div></div>
+        <div class="row" style="gap:48px;align-items:stretch;flex:1;">
+          <div class="stack" style="flex:1.05;justify-content:center;gap:22px;">
+            <div class="layer">
+              <div class="lnum">L1</div>
+              <div class="lbody"><div class="lt">Deny-list</div><div class="ls"><code>{KILL, EXEC}</code> — humans extend it; the kernel rejects any edit from an agent process</div></div>
+            </div>
+            <div class="layer danger">
+              <div class="lnum">L2</div>
+              <div class="lbody"><div class="lt">Blocked syscalls</div><div class="ls">Kernel refuses <code>exec</code> · <code>kill</code> · <code>mknod</code> for agent-role processes</div></div>
+            </div>
+            <div class="layer danger">
+              <div class="lnum">L3</div>
+              <div class="lbody"><div class="lt">chroot jail</div><div class="ls">Locked folder — outside files invisible, every <code>..</code> above the root refused</div></div>
+            </div>
           </div>
-          <div class="layer danger">
-            <div class="lnum">L2</div>
-            <div class="lbody"><div class="lt">Blocked syscalls</div><div class="ls">Kernel refuses <code>exec</code> · <code>kill</code> · <code>mknod</code> outright for agent-role processes</div></div>
-          </div>
-          <div class="layer danger">
-            <div class="lnum">L3</div>
-            <div class="lbody"><div class="lt">chroot jail</div><div class="ls">Locked folder — outside files invisible, every <code>..</code> that climbs above the root refused</div></div>
+          <div class="term" style="flex:1;align-self:center;">
+            <div class="tbar"><i></i><i></i><i></i></div>
+            <div class="tline"><span class="dim">agent@agentbox</span> <span class="prompt">$</span> cat notes.txt</div>
+            <div class="tline">remember to water the plants</div>
+            <div class="tline"><span class="dim">agent@agentbox</span> <span class="prompt">$</span> cat ../host/secret.key</div>
+            <div class="tline"><span class="deny">denied</span> · path escapes /agentbox</div>
+            <div class="tline"><span class="dim">agent@agentbox</span> <span class="prompt">$</span> exec sh</div>
+            <div class="tline"><span class="deny">denied</span> · syscall blocked for agent role</div>
           </div>
         </div>
       </div>
@@ -652,34 +662,35 @@ deck-stage:not(:defined){visibility:hidden;}
   <section data-label="Audit">
     <div class="slide">
       <div class="chrome">
-        <div class="eyebrow"><span class="dot"></span>03 · Honest engineering</div>
-        <h1 class="title">We attacked our own kernel — twice</h1>
-        <p class="dek">Two audits — what we fixed, and what we openly leave open.</p>
+        <div class="eyebrow"><span class="dot"></span>03 · Results</div>
+        <h1 class="title">What we shipped, and what's next</h1>
+        <p class="dek">Four kernel elements, all running and verified — and the limits we name honestly.</p>
         <div class="hairline"></div>
       </div>
       <div class="body">
-        <div class="score" style="margin-bottom:36px;">
+        <div class="score" style="flex:1;align-items:stretch;">
           <div class="scard fixed">
-            <div class="stop"><span class="sn">Fixed · 7</span><span class="sk">reproducers flip to safe</span></div>
+            <div class="stop"><span class="sn">Shipped</span><span class="sk">running &amp; verified</span></div>
             <div class="sitems">
-              <div class="sitem"><span class="sid">#1 #3 #4</span><span class="sx">self-approval · renice self-scope · wire injection</span></div>
-              <div class="sitem"><span class="sid">#10–#13</span><span class="sx">deny-list bypass · wire-forgery · inode leak · misparse</span></div>
+              <div class="sitem"><span class="sid">CFS</span><span class="sx">41-weight scheduler, integer-only, no starvation</span></div>
+              <div class="sitem"><span class="sid">Sandbox</span><span class="sx">three kernel-enforced layers per agent command</span></div>
+              <div class="sitem"><span class="sid">Cache</span><span class="sx">16-slot table + disk overlay, warm queries skip the network</span></div>
+              <div class="sitem"><span class="sid">Syscalls</span><span class="sx">agent interface + two-stage dispatch</span></div>
+              <div class="sitem"><span class="sid">Tested</span><span class="sx">65/65 regression · two audits · 7 issues fixed</span></div>
             </div>
           </div>
           <div class="scard open">
-            <div class="stop"><span class="sn">Open · 2</span><span class="sk">named, not rushed</span></div>
+            <div class="stop"><span class="sn">Limits &amp; next</span><span class="sk">named, not rushed</span></div>
             <div class="sitems">
               <div class="sitem"><span class="sid">#2</span><span class="sx">cache split-brain between jailed and host views</span></div>
               <div class="sitem"><span class="sid">#5</span><span class="sx">SPAWN missing from the default deny-list</span></div>
+              <div class="sitem"><span class="sid">Scale</span><span class="sx">vruntime is an O(n) scan — fine for class, would need an RB-tree</span></div>
+              <div class="sitem"><span class="sid">Model</span><span class="sx">single Solar endpoint — no multi-model routing yet</span></div>
             </div>
           </div>
         </div>
-        <div class="term">
-          <div class="tline"><span class="dim">$</span> python3 tools/sec_audit.py</div>
-          <div class="tline">#1 secconfirm: <span class="safe">SAFE</span>&nbsp;&nbsp;#3 secnice: <span class="safe">SAFE</span>&nbsp;&nbsp;regression: <span class="safe">65/65</span></div>
-        </div>
       </div>
-      <div class="foot"><span class="foot-tag">Two audits · all 65 regression held green</span><span class="foot-pg">Fixes landed in PR #13 · #14 · #16 — F10 out of scope</span></div>
+      <div class="foot"><span class="foot-tag">Four elements live · 65/65 regression held green</span><span class="foot-pg">Open issues tracked in the repo, not hidden</span></div>
     </div>
   </section>
 
@@ -688,8 +699,8 @@ deck-stage:not(:defined){visibility:hidden;}
     <div class="slide dark-green">
       <div class="close-wrap">
         <div class="cl-lead">In one line</div>
-        <div class="cl-big">We didn't run an LLM on an OS — we taught the OS to <span class="em">host the LLM</span>, and every concept from this course is now something you can watch it do.</div>
-        <div class="cl-sub">Operating Systems · 2026 Term Project — Direction A · agent runtime on xv6-riscv. Thank you.</div>
+        <div class="cl-big">Not an LLM on an OS.<br>An OS that <span class="em">hosts the LLM</span>.</div>
+        <div class="cl-sub">Team Last of OS · Direction A on xv6-riscv — thank you.</div>
       </div>
     </div>
   </section>
