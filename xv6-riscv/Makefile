@@ -161,7 +161,6 @@ UPROGS=\
 	$U/_confirm_mknod\
 	$U/_secnice\
 	$U/_secconfirm\
-	$U/_cfs_bench\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

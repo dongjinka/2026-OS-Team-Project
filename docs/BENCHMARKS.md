@@ -14,7 +14,7 @@ python3 tools/bench_report.py > docs/BENCHMARKS.md
 
 ## 1. CFS 우선순위 → CPU 점유율
 
-6개 자식(`user/cfs_bench.c`)이 동일 wall-clock(150 ticks) 동안 각자 고정
+6개 자식(`user/cfs_share.c`, `cfs_share 150 0 4 8 12 16 19`로 구동)이 동일 wall-clock(150 ticks) 동안 각자 고정
 우선순위로 경쟁한 루프 카운트와 점유율. 낮은 priority 값 = 높은 가중치
 (`kernel/proc.c`의 Linux `cfs_weight[]`) = 더 많은 CPU. "기대 share"는 가중치
 비율(`weight / Σweight`)이다.
@@ -39,7 +39,7 @@ _total = 620,376,000 iterations, 6 priority levels._
 *finish-order*로는 분리를 관측하기 어렵다고 기록돼 있었다. 위처럼 **고정 wall-clock
 점유율**로 측정하면 중간대까지 깨끗이 분리되고 기대치와 일치한다 — 즉 가중치
 매핑 자체는 정상이며, Test 3의 *측정 방식*(짧은 burn + 종료 순서)이 분해능이
-낮았던 것이다. cfs_bench는 share 기반이라 이 한계를 우회한다.
+낮았던 것이다. cfs_share 스윕은 share 기반이라 이 한계를 우회한다.
 
 ---
 

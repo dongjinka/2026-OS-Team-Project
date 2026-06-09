@@ -3,7 +3,7 @@
 루트 [`README.md`](../../README.md) §5 / [`README.ko.md`](../../README.ko.md) §5에서
 인라인하는 데모 캡처 폴더다. **2026-06-08 캡처 8장이 들어 있고**, 모두
 `mode: solar (solar-pro2)`, smp=1, agent mode 실제 세션 출력이다. asciinema
-GIF·`priority_test` 화면·`cfs_bench` 화면은 아직 안 들어왔다(아래 "추가 후보").
+GIF·`priority_test` 화면·`cfs_share` 화면은 아직 안 들어왔다(아래 "추가 후보").
 
 ## 인덱스 (2026-06-08)
 
@@ -24,7 +24,7 @@ GIF·`priority_test` 화면·`cfs_bench` 화면은 아직 안 들어왔다(아�
 | --- | --- |
 | `agent-demo.gif` | `make qemu-agent` + `python3 agent.py` 세션 녹화 (asciinema) |
 | `priority-test.png` | `make qemu` → `priority_test` |
-| `cfs-bench.png` | `make qemu CPUS=1` → `cfs_bench` |
+| `cfs-bench.png` | `make qemu CPUS=1` → `cfs_share 150 0 4 8 12 16 19` |
 
 ## 녹화 → GIF
 

@@ -10,7 +10,7 @@
 //   3. 사용자 응답이 `REQ|agent:host|CONFIRM_RES|<pid>|y` 또는 `|n` 으로
 //      들어오면, agentcmd.c 의 와이어 핸들러가 confirm_resolve() 를 호출.
 //   4. 게스트의 confirm_request() 가 wakeup 되어 결과를 syscall() 에 반환.
-//   5. timeout (5초) 시 자동 거부.
+//   5. timeout (15초, CONFIRM_TIMEOUT_TICKS=150) 시 자동 거부.
 //
 // v2 노트 — yield-polling → sleep/wakeup 전환:
 //   v1 은 매 iteration 에 yield() 로 CPU 양보 → 호스트 응답 polling. 이 패턴

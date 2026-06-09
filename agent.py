@@ -48,6 +48,12 @@ SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 DEFAULT_MODEL = "solar-pro2"      # override via UPSTAGE_MODEL
 MAX_STEPS = 8                     # tool calls allowed per user request
 MAX_HISTORY = 24                  # chat messages kept besides the system prompt
+# Host-side confirm-escape read budget. The kernel denies a jailed dangerous
+# syscall after CONFIRM_TIMEOUT_TICKS (150 ≈ 15 s, kernel/confirm.c); the host
+# read MUST stay bounded by the same deadline so a buried / ignored prompt can
+# never leave the confirm thread blocked on stdin past that point — a zombie
+# reader would otherwise steal the user's next REPL line.
+HOST_CONFIRM_TIMEOUT = 15.0       # seconds
 # ── kernel wire buffer limits (mirror the fixed-size buffers in the kernel;
 # the host MUST stay under them or the kernel silently truncates the line) ──
 WIRE_MAX = 1200                   # meta REQ| line budget — kernel agent_q is
@@ -93,6 +99,13 @@ _cursor = "start"
 _input_live = False
 _input_buf = ""
 _input_prompt = ""
+
+# Confirm-escape coordination (guarded by _LOCK). While a jail confirm prompt is
+# outstanding, (a) the reader thread must stop interleaving live xv6 output so
+# the prompt isn't buried, and (b) the main REPL must not read stdin, so there is
+# never more than one thread competing for the y/N answer.
+_confirm_active = False
+_confirm_deferred = []            # (line, terminated) xv6 output withheld during a confirm
 
 _RST, _GREEN, _CYAN = "\033[0m", "\033[92m", "\033[96m"
 _YELLOW, _RED, _BOLD, _DIM = "\033[93m", "\033[91m", "\033[1m", "\033[2m"
@@ -219,15 +232,16 @@ def _wrap_display(s: str, width: int) -> list:
         if cur:
             pieces.append(cur)
             cur = ""
-        while _disp_width(word) > width:        # word alone exceeds the line
-            take = ""
-            for ch in word:
-                if _disp_width(take + ch) > width:
-                    break
-                take += ch
-            pieces.append(take)
-            word = word[len(take):]
-        cur = word
+        # word alone exceeds the line — hard-break it into <=width chunks in a
+        # single linear pass (no repeated full-width rescans of the remainder).
+        start, used = 0, 0
+        for i, ch in enumerate(word):
+            w = _disp_width(ch)
+            if used + w > width and i > start:  # i > start: never emit empty
+                pieces.append(word[start:i])
+                start, used = i, 0
+            used += w
+        cur = word[start:]                      # remainder (<=width) carries on
     if cur or not pieces:
         pieces.append(cur)
     return pieces
@@ -359,7 +373,11 @@ def wire_for(tool: str, args: dict):
         if tool == "help":  return "HELP|"
         if tool == "chat":  return f"CHAT|{_wire_escape(args.get('msg',''))}"
         if tool == "read":  return f"READ|{_wire_escape(args['file'])}"
-        if tool == "write": return f"WRITE|{_wire_escape(args['file'])}:{_wire_escape(args.get('text',''))}"
+        if tool == "write":
+            wf = str(args['file'])
+            if ':' in wf:       # ':' delimits <file>:<text> on the wire; a path
+                return None     # containing ':' would mis-split the field in agentd
+            return f"WRITE|{_wire_escape(wf)}:{_wire_escape(args.get('text',''))}"
         if tool == "print": return f"PRINT|{_wire_escape(args.get('msg',''))}"
         if tool == "nice":  return f"NICE|{int(args['pid'])}:{int(args['priority'])}"
         if tool == "spawn":
@@ -476,6 +494,15 @@ def _read_line(prompt: str) -> str:
     On a non-tty (piped input, tests) the function always uses input()."""
     global _cursor, _input_live, _input_buf, _input_prompt
 
+    # Never read stdin while a jail-confirm prompt owns it — otherwise this
+    # thread and the confirm handler both block on stdin and the user's line
+    # goes to whichever wins the race. Yield until the confirm resolves.
+    while True:
+        with _LOCK:
+            if not _confirm_active:
+                break
+        time.sleep(0.05)
+
     use_raw = (termios is not None
                and sys.stdin.isatty()
                and os.environ.get("AGENT_RAW_INPUT", "").strip() in ("1", "true", "yes"))
@@ -577,6 +604,28 @@ def _is_korean(s: str) -> bool:
     host-side prompts (e.g. the confirm-escape gate) to the user's question
     language."""
     return any('가' <= c <= '힣' for c in (s or ""))
+
+
+def _parse_confirm_req(line: str):
+    """Parse a kernel `CONFIRM_REQ|<pid>|<call>|<summary>` control line into
+    (pid, call, summary), or None if the line is not a confirm request.
+
+    Tolerates a few stray bytes prepended by the console echo race (the kernel
+    echoes a sibling `REQ|` command's prefix one byte per interrupt, which can
+    land in front of the confirm printf — e.g. `RCONFIRM_REQ|5|7|exec`). The
+    kernel-side fix removes that echo at the source; locating the `CONFIRM_REQ|`
+    token here rather than matching the start of the line is belt-and-suspenders
+    so a corrupted control line is still recognised and answered, never dropped."""
+    i = line.find("CONFIRM_REQ|")
+    if i == -1:
+        return None
+    parts = line[i:].rstrip("\r\n").split("|", 3)
+    if len(parts) < 3:
+        return None
+    pid = parts[1]
+    call = parts[2]
+    summary = parts[3] if len(parts) >= 4 else ""
+    return (pid, call, summary)
 
 
 class Agent:
@@ -709,7 +758,10 @@ class Agent:
                 # jail Confirm-Escape — 게스트의 위험 syscall 차단 시도가
                 # `CONFIRM_REQ|<pid>|<call>|<summary>` 를 보냄. 사용자에게
                 # 일회 허용/거부를 묻고 `CONFIRM_RES` 로 회신.
-                if ln.startswith("CONFIRM_REQ|"):
+                if "CONFIRM_REQ|" in ln:
+                    # `in`, not startswith: the console echo race can prepend a
+                    # few stray bytes (RCONFIRM_REQ|...). _parse_confirm_req
+                    # recovers the fields; never drop a confirm or it auto-denies.
                     threading.Thread(target=self._handle_confirm_req,
                                      args=(ln,), daemon=True).start()
                     continue
@@ -736,6 +788,12 @@ class Agent:
             if ln == "":
                 return                       # blank line
         with _LOCK:
+            if _confirm_active:
+                # a jail confirm prompt owns the screen; withhold this line and
+                # replay it once the user has answered (markers are matched off
+                # capture_buf, so deferring the live echo loses nothing).
+                _confirm_deferred.append((ln, terminated))
+                return
             if _input_live:
                 # user is mid-prompt: lift the input line, print, redraw it
                 _wipe_input()
@@ -930,19 +988,27 @@ class Agent:
         """게스트가 위험 syscall 차단 시도 시 보낸 CONFIRM_REQ 라인을 받아
         사용자에게 y/N 을 묻고 CONFIRM_RES 로 회신. 15초 안에 응답 없으면
         커널 측 timeout 으로 자동 거부됨."""
-        # `CONFIRM_REQ|<pid>|<call>|<summary>` — call/summary 둘 다 있을 수 있고
-        # summary 가 비어 있을 수도. split 결과 길이가 3 또는 4.
-        parts = line.rstrip("\r\n").split("|", 3)
-        if len(parts) < 3:
+        global _confirm_active
+        # `CONFIRM_REQ|<pid>|<call>|<summary>` — tolerant parse (recovers from a
+        # console-echo-race byte prefix; see _parse_confirm_req).
+        parsed = _parse_confirm_req(line)
+        if parsed is None:
             return
-        pid = parts[1]
-        call = parts[2]
-        summary = parts[3] if len(parts) >= 4 else ""
+        pid, call, summary = parsed
+        info(f"[bridge] CONFIRM_REQ pid={pid} call={call} summary={summary!r}")
+
+        # Claim the screen + stdin: _read_line yields and _show defers while this
+        # is set, so the prompt is the only thing on screen and the only stdin
+        # reader. Lift any in-flight raw-mode input line first.
+        with _LOCK:
+            if _input_live:
+                _wipe_input()
+            _confirm_active = True
 
         # stdin buffer drain — ReAct 가 도구 호출 시작한 후 사용자가 (무의식적
-        # 으로) enter 한 번 친 빈 line 같은 *stale 입력* 이 OS line buffer 에
-        # 남아 있을 수 있다. drain 안 하면 우리 input() 이 그 빈 line 을 즉시
-        # 받아서 "n" 으로 해석 — 사용자가 본 적도 없는 prompt 에 강제 deny.
+        # 으로) enter 한 번 친 빈 line 같은 *stale 입력* 이 tty line buffer 에
+        # 남아 있을 수 있다. drain 안 하면 첫 read 가 그 빈 line 을 즉시 받아
+        # "n" 으로 해석 — 사용자가 본 적도 없는 prompt 에 강제 deny.
         # TTY 일 때만 시도 — pipe stdin (회귀) 은 의도된 line 만 들어옴.
         try:
             if sys.stdin.isatty() and termios is not None:
@@ -959,13 +1025,69 @@ class Agent:
         else:
             prompt = (f"\n[jail] pid={pid} requests dangerous syscall '{summary or call}' "
                       f"— allow within 15s? (y/N) ")
+
+        ans = ""
         try:
-            ans = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            ans = "n"
-        allow = "y" if ans.strip().lower().startswith("y") else "n"
-        self._send(f"REQ|agent:host|CONFIRM_RES|{pid}|{allow}")
-        info(f"[bridge] CONFIRM_RES → pid={pid} {allow}")
+            with _LOCK:
+                _raw(f"{_BOLD}{_YELLOW}{prompt}{_RST}")
+            ans = self._read_confirm_answer(HOST_CONFIRM_TIMEOUT)
+        finally:
+            allow = "y" if ans.strip().lower().startswith("y") else "n"
+            self._send(f"REQ|agent:host|CONFIRM_RES|{pid}|{allow}")
+            info(f"[bridge] CONFIRM_RES → pid={pid} {allow} (answer={ans!r})")
+            # Release the screen: replay the xv6 output withheld during the prompt,
+            # then redraw any in-flight REPL input line.
+            with _LOCK:
+                _confirm_active = False
+                deferred = list(_confirm_deferred)
+                _confirm_deferred.clear()
+            for dl, dterm in deferred:
+                self._show(dl, dterm)
+            with _LOCK:
+                if _input_live:
+                    _draw_input()
+
+    def _read_confirm_answer(self, timeout: float) -> str:
+        """Read one y/N answer line from stdin.
+
+        On a real interactive TTY the read is bounded by `timeout` seconds via
+        select(): a buried or ignored prompt must never leave this thread blocked
+        on stdin past the kernel's deny deadline, or it would steal the user's
+        next REPL line. Returns "" on timeout / EOF (caller treats it as deny).
+
+        On a non-tty (piped input, tests) input is deterministic and line-oriented,
+        so a plain blocking input() is used — no over-read, no behavior change."""
+        if not (sys.stdin.isatty() and termios is not None):
+            try:
+                return input()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+        try:
+            fd = sys.stdin.fileno()
+        except (ValueError, OSError):
+            return ""
+        deadline = time.time() + timeout
+        buf = b""
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return ""                       # timeout → deny
+            try:
+                r, _, _ = select.select([fd], [], [], remaining)
+            except (OSError, ValueError):
+                return ""
+            if not r:
+                return ""                       # timeout → deny
+            try:
+                chunk = os.read(fd, 256)
+            except OSError:
+                return ""
+            if not chunk:
+                return ""                       # EOF → deny
+            buf += chunk
+            if b"\n" in buf or b"\r" in buf:
+                first = buf.split(b"\n", 1)[0].split(b"\r", 1)[0]
+                return first.decode("utf-8", "ignore")
 
     # ---------- option 2: whole-answer reuse via the kernel F9 cache ----------
 

@@ -13,7 +13,7 @@
 3. [전체 그림 — 시스템 아키텍처](#3-전체-그림--시스템-아키텍처)
 4. [Phase 1 — 파이썬과 운영체제를 연결하기](#4-phase-1--파이썬과-운영체제를-연결하기)
 5. [Phase 2 — 공정한 CPU 분배: CFS 스케줄러](#5-phase-2--공정한-cpu-분배-cfs-스케줄러)
-6. [Phase 4 — 커널 명령어 디스패처 (8개 액션)](#6-phase-4--커널-명령어-디스패처)
+6. [Phase 4 — 커널 명령어 디스패처 (도구 11종)](#6-phase-4--커널-명령어-디스패처)
 7. [Phase 3 — LLM 응답 캐시](#7-phase-3--llm-응답-캐시)
 7-bis. Phase 5 — 역할(role) 기반 ACL 샌드박싱 *(시제품 → PR 1 통합 후 jail 모델로 일원화)*
 7-ter. 평가지표 — `eval` 셸 명령
@@ -359,11 +359,15 @@ LLM 에이전트 여러 개가 도는 시스템에서, 어떤 에이전트가 �
 타이머 인터럽트가 올 때마다 (= CPU를 한 조각 썼을 때마다):
 
 ```c
-vruntime += (priority + 1)
+// 가중치 역비례 고정소수점 증분 (kernel/proc.c cfs_vdelta)
+vruntime += CFS_WMULT * NICE_0_LOAD / cfs_weight[priority + 20]
 ```
 
-- 우선순위 0(최고) → 매번 +1 (천천히 증가) → 자주 선택됨 → CPU 많이 받음
-- 우선순위 20(최저) → 매번 +21 (빨리 증가) → 가끔 선택됨 → CPU 적게 받음
+`cfs_weight[41]` 은 Linux 의 `sched_prio_to_weight` 테이블이다 — 우선순위가
+높을수록(nice 가 낮을수록) weight 가 커서 같은 분자를 나눈 증분이 작아진다.
+
+- 우선순위 0(최고) → weight 1024 → 증분 작음 (천천히 증가) → 자주 선택됨 → CPU 많이 받음
+- 우선순위 20(최저) → weight 12 → 증분 큼 (빨리 증가) → 가끔 선택됨 → CPU 적게 받음
 
 하지만 우선순위 20도 **언젠가는** 선택된다(vruntime이 결국 최소가 되는 순간이 옴)
 → 굶주림 없음.
@@ -381,7 +385,7 @@ vruntime += (priority + 1)
 
 **(3) 타이머 인터럽트에서 vruntime 가산** (`kernel/trap.c`):
 - 타이머 인터럽트가 올 때마다 실행 중이던 프로세스의 vruntime을
-  `priority+1`만큼 올림.
+  `cfs_vdelta(priority)` (가중치 역비례 증분) 만큼 올림.
 
 **(4) 새 프로세스 초기화** (`allocproc()`):
 - 새로 만들어진 프로세스의 vruntime을 "현재 최소값"으로 설정 → 새 프로세스가
@@ -423,32 +427,45 @@ xv6에서 시리얼로 글자가 들어오면 `consoleintr()` 함수가 처리�
 
 이렇게 하면 사람이 치는 셸 명령과 에이전트 명령이 같은 통로를 써도 안 섞인다.
 
-### 6.3 명령어 종류 — 총 8개 액션
+### 6.3 명령어 종류 — agentd 도구 11종
 
 > **PR 1 통합 후의 라우팅** — 메타-명령은 *커널 in-kernel*, 위험 명령은 *jail
-> 안 agentd* 가 실행. 위험 syscall (`exec`/`kill`/`mknod`) 은 커널
-> `agent_blocked()` 가 즉시 거부. (역사적 *역할(role) 기반 ACL* 시제품은 §7-bis
-> 학습 자료로 보존.)
+> 안 agentd* 가 실행. 와이어 명령의 *첫 번째* 게이트는 **설정 가능한 deny-list
+> (F7)** 다 — `forward_wire_to_agentd()` 가 enqueue 전에 `deny_listed()` 로
+> 검사하며, 기본값은 `deny_default[] = { "KILL", "EXEC" }` (`agentcmd.c:77`).
+> 이 deny-list 는 런타임 변경 가능하다 (`deny_add` / `deny_clear`, `denyctl`
+> 도구). 그보다 *깊은 단*의 위험 syscall (`exec`/`kill`/`mknod`) 은 별개로
+> 커널 `agent_blocked()` 가 거부/confirm-escape 한다. (역사적 *역할(role) 기반
+> ACL* 시제품은 §7-bis 학습 자료로 보존.)
+
+agentd 디스패치 테이블 (`user/agentd.c:36-46`) 은 **11개 도구**를 가진다:
 
 | 명령                            | 하는 일                                       | 실행 위치                           |
 | ------------------------------- | --------------------------------------------- | ----------------------------------- |
 | `REQ\|PRINT\|메시지`            | 콘솔에 `[agentd] 메시지` 출력                 | jailed agentd                       |
 | `REQ\|CHAT\|텍스트`             | `[chat] 텍스트` — LLM의 자연어 응답을 그대로  | jailed agentd                       |
 | `REQ\|READ\|/foo.txt`           | `open(O_RDONLY) + read` (jail 내 chroot)      | jailed agentd                       |
-| `REQ\|LS\|/`                    | `open + dirent` 순회 (jail 내)                | jailed agentd                       |
-| `REQ\|PS`                       | stub — userspace proc-list syscall 후속 작업  | jailed agentd                       |
-| `REQ\|WRITE\|/foo.txt\|hello`   | `open(O_CREATE\|O_RDWR) + write` (jail 내)    | jailed agentd                       |
-| `REQ\|KILL\|7`                  | `kill(7)` → `agent_blocked` 차단              | **차단** (jail boundary)            |
+| `REQ\|WRITE\|/foo.txt:hello`    | `open(O_CREATE\|O_RDWR) + write` (jail 내)    | jailed agentd                       |
+| `REQ\|LS\|`                     | `open + dirent` 순회 (jail 내)                | jailed agentd                       |
 | `REQ\|NICE\|5:3`                | `setpriority(5, 3)`                           | jailed agentd                       |
+| `REQ\|LIST\|`                   | 도구 목록 출력                                | jailed agentd                       |
+| `REQ\|SETPRIO\|FN:3`            | 도구별 per-function 우선순위 조정 (F8)        | jailed agentd                       |
+| `REQ\|PS\|`                     | stub — userspace proc-list syscall 후속 작업  | jailed agentd                       |
+| `REQ\|HELP\|`                   | 각 도구 usage 출력                            | jailed agentd                       |
+| `REQ\|SPAWN\|bin\|argv`         | `fork+exec` (자식이 jail 상속, confirm-escape)| jailed agentd (§11.13)              |
 | `REQ\|ASK\|질문`                | 오케스트레이션 진입점 — 7.6절                 | 커널 in-kernel (메타, 캐시 조회)    |
 | `REQ\|LLM_RESP\|...`            | agent.py의 LLM 답변 — 7.6절                   | 커널 in-kernel (메타, 캐시 저장)    |
 
-8개가 실제 "도구"(tool). 메타-명령(ASK/LLM_RESP/CACHE_\*)은 커널의 캐시
-오케스트레이션이라 in-kernel 처리. 나머지는 모두 `forward_to_agentd()` 로
-agentd 큐(`agentq`)에 enqueue → `sys_agent_recv()` 로 pull → user-space 에서 실행.
+11개가 실제 "도구"(tool) — 그중 `SPAWN` / `SETPRIO` 는 특수 (전자는
+confirm-escape 게이트를 trip, 후자는 F8 도구별 튜닝). 메타-명령(ASK/LLM_RESP/
+CACHE_\*)은 커널의 캐시 오케스트레이션이라 in-kernel 처리. 나머지는 모두
+deny-list 통과 후 `forward_to_agentd()` 로 agentd 큐(`agentq`)에 enqueue →
+`sys_agent_recv()` 로 pull → user-space 에서 실행. `KILL` / `EXEC` 는 기본
+deny-list 에 올라 있어 enqueue 자체가 거부되므로 위 테이블에 도구 행이 없다.
 
 > **왜 PID ≤ 2를 보호하나?** PID 1(`init`)과 PID 2(`sh`)는 OS의 심장이다. 사실
-> jail 모델에선 `kill` 자체가 `agent_blocked` 로 차단되므로 *어떤 pid 도* 못 죽
+> jail 모델에선 `KILL` 이 기본 deny-list 에서 enqueue 전에 막히고, 설령
+> 통과해도 `kill` syscall 이 `agent_blocked` 로 차단되므로 *어떤 pid 도* 못 죽
 > 인다. PID ≤ 2 보호는 *role-ACL 시제품 단계*의 추가 안전장치였고, jail 통합 후
 > 엔 차단이 *더 깊은 단(syscall)* 에서 일어난다.
 
@@ -461,8 +478,9 @@ REQ|agent:<role>|<CMD>|<arg>      ← role 라벨 (reader / writer / admin) — 
 
 agent.py REPL 은 사용자가 `:role <name>` 으로 토글한 현재 역할을 매 입력에 자동
 부착해 송신한다. **단, 신뢰 경계는 사용자가 아니라 jail 안에 있다** — 사용자가
-admin 으로 토글해도 위험 syscall 은 jail 안에서 거부된다. role 은 wire 진단
-라벨로 남고, 실제 sandboxing 은 jail (chroot + `agent_blocked()`) 이 담당.
+admin 으로 토글해도 위험 명령은 deny-list 에서, 위험 syscall 은 jail 안에서
+거부된다. role 은 wire 진단 라벨로 남고, 실제 sandboxing 은 deny-list (F7) +
+jail (chroot + `agent_blocked()`) 이 담당.
 
 ### 6.5 두 단계 설계 — enqueue와 drain (중요!)
 
@@ -521,7 +539,7 @@ LLM API 호출은 (1) 느리고(수 초) (2) 돈이 든다. 사용자가 같은 
 #### 7.2.3 FNV-1a 알고리즘 — 5줄짜리 함수
 
 본 프로젝트가 채택한 알고리즘은 **FNV-1a (Fowler–Noll–Vo, variant a)** 의
-64-bit 버전. [cache.c:58-68](xv6-riscv/kernel/cache.c) 에 그대로 구현되어 있다:
+64-bit 버전. [cache.c:82-92](xv6-riscv/kernel/cache.c) 에 그대로 구현되어 있다:
 
 ```c
 static uint64
@@ -629,7 +647,7 @@ fnv1a_64(const char *data, int len)
 #### 7.2.8 `h == 0 → 1` 트릭
 
 함수 마지막 줄 `return (h == 0) ? 1 : h;` 는 일견 부자연스럽다. 이유는 캐시 슬롯
-구조에 있다 ([cache.c:23-28](xv6-riscv/kernel/cache.c)):
+구조에 있다 ([cache.c:45-52](xv6-riscv/kernel/cache.c)):
 
 ```c
 struct cache_entry {
@@ -654,7 +672,7 @@ struct cache_entry {
 | 계층   | 무엇                         | 용량         | 속도   |
 | ------ | ---------------------------- | ------------ | ------ |
 | RAM    | `cache_entry` 배열 16칸      | 16개         | 빠름   |
-| 디스크 | `/cache.bin` 파일            | 약 7,800개   | 느림   |
+| 디스크 | `/cache.bin` 파일            | 약 4,000개   | 느림   |
 
 RAM은 빠르지만 작다(16칸). 꽉 차면 어떻게 할까?
 
@@ -1030,9 +1048,10 @@ P(min_h(A) == min_h(B)) = |A ∩ B| / |A ∪ B| = J(A, B)
 차원 개수** 가 `K × J(A,B)` 의 불편 추정량이 된다 — 표준편차 σ ≈ 1/√K.
 
 본 프로젝트는 **K = 64** 채택 — 슬롯당 +512 byte (`uint64[64]`),
-σ(Jaccard) ≈ 0.125. K = 128 은 커널 스택 4 KB 한도를 초과한다 (§7.7.10).
+σ(Jaccard) ≈ 0.125. K = 128 의 signature 도 1 KB 라 32 KB 커널 스택에는
+여유가 있다 — K = 64 는 정확도/비용 균형에서 고른 값이다 (§7.7.10).
 
-코드 [cache.c:98-117](xv6-riscv/kernel/cache.c):
+코드 [cache.c:146-177](xv6-riscv/kernel/cache.c):
 
 ```c
 build_signature(const char *key, int klen, uint64 out_sig[SIG_K])
@@ -1066,7 +1085,7 @@ LSH(Locality-Sensitive Hashing) 논문들이 표준으로 쓰는 트릭. shingle
 비용: FNV-1a 두 번 + K 회 산술. K=64 라도 약 200 ns.
 
 두 *진짜* 해시 `h_1`, `h_2` 는 같은 FNV-1a 를 **다른 offset basis** 로 두 번
-돌려서 만든다 ([cache.c:84-95](xv6-riscv/kernel/cache.c)):
+돌려서 만든다 ([cache.c:95-105](xv6-riscv/kernel/cache.c)):
 
 ```c
 fnv1a_64_pair(const char *s, int n, uint64 *h1, uint64 *h2)
@@ -1114,7 +1133,7 @@ match · 5    ≥  2  · 64  = 128
 만약 옛 응답이 `WRITE|/log.txt|...` 였고 새 paraphrase 가 의미 hit 으로
 그걸 그대로 실행해 버린다면? 사용자 의도와 다른 *부작용* (파일 덮어쓰기,
 프로세스 종료) 이 발생한다. 그래서 의미 hit 은 **부작용 없는 응답
-(`CHAT|...`, `PRINT|...`) 에만 적용** ([agentcmd.c:309-345](xv6-riscv/kernel/agentcmd.c)):
+(`CHAT|...`, `PRINT|...`) 에만 적용** ([agentcmd.c:293-318](xv6-riscv/kernel/agentcmd.c)):
 
 ```c
 clen = cache_get_semantic(arg, plen, cached, 1024, &score);
@@ -1153,7 +1172,7 @@ cache_get_semantic  (MinHash 64-D + Jaccard)      ← 새로 추가
 ```
 
 외부에서 부르는 `cache_get()` 은 두 단계를 자동으로 fallback 시키는 wrapper
-([cache.c:349-355](xv6-riscv/kernel/cache.c)) — 기존 호출자 (`sys_get_cache`,
+([cache.c:427-433](xv6-riscv/kernel/cache.c)) — 기존 호출자 (`sys_get_cache`,
 `handle_cache_get`) 는 코드 한 줄도 안 바뀜.
 
 #### 7.7.10 한계와 튜닝 여지
@@ -1162,10 +1181,12 @@ cache_get_semantic  (MinHash 64-D + Jaccard)      ← 새로 추가
   바뀌지 않아서 (기존 cache 파일 호환). 의미 매치는 RAM 16 슬롯 안에서만.
   디스크로 밀려난 항목은 §7.4 의 promote 경로로 RAM 에 다시 올라온 뒤에야
   의미 매치 대상이 된다.
-- **K = 64 가 커널 스택 4 KB 의 binding 제약** — `handle_ask` 가 ~1 KB,
-  semantic 경로의 query signature 가 ~512 B, 디스패처 체인까지 합치면
-  ~3 KB. 4 KB 한도까지 약 1 KB 여유. K = 128 로 키우려면 `cached[1025]` 같은
-  로컬 버퍼를 file-static 으로 옮겨야 한다.
+- **K = 64 는 정밀도/비용 균형값 (더 이상 스택 제약이 아님)** — 과거 단일 4 KB
+  스택 시절엔 `handle_ask`(~1 KB) + query signature(~512 B) + 디스패처 체인이
+  스택을 압박했으나, 커널 스택을 8 페이지 = 32 KB 로 키운 뒤 (memlayout.h:55
+  `KSTACK_PAGES 8`, agent/cache/FS 체인 측정 peak ~16 KB) K 는 스택-바운드가
+  아니다. K = 128 로 키워도 signature 는 1 KB 라 여유가 충분하다 — K = 64 는
+  순전히 정확도 대비 비교 비용에서 고른 값이다.
 - **double hashing 의 통계적 약점** — 진정한 K-독립이 아니라 추정 bias 가
   약간 있다. false positive 가 잦으면 `SEMANTIC_MATCH_NUM`/`DEN` 비율을 올리면
   됨 (`#define` 한 줄 변경).
@@ -1432,15 +1453,18 @@ $ agent_multi
 **증상**: 오케스트레이션(`REQ|ASK`)을 도입한 뒤, 명령 실행 순간 커널이 다시
 패닉했다 (store page fault).
 
-**원인**: 커널이 한 프로세스에 주는 스택은 **4KB로 작다**. 그런데 큐 처리 함수가
-2KB 버퍼를 쓰고, 그 안에서 부른 `exec_wire`가 또 2KB 버퍼를 쓰고, 거기서 다시
-명령 처리 함수를 **재귀 호출**했다. 2KB + 2KB + … 가 4KB를 넘겨 스택이 옆 메모리를
-침범했다.
+**원인**: 스톡 xv6 가 한 프로세스에 주는 커널 스택은 **단일 4KB 페이지**로 작다.
+그런데 agent/cache/FS 체인(`agent_drain_locked → handle_*/cache_set`, 각 ~1 KB
+프레임 + 디스크-쓰기 체인)이 깊어지면 4KB 스택을 넘겨 가드 페이지에서 폴트
+(`scause=0xf` at kernelvec)했다. spawn → exec 체인까지 겹치면 측정 peak 가 ~16 KB.
 
-**교훈**: 커널 스택은 매우 작다. 큰 지역 배열·깊은 재귀를 피해야 한다.
+**교훈**: 커널 스택은 작다. 깊은 호출 체인·큰 지역 배열을 줄이거나, 스택 자체를 키워야 한다.
 
-**해결**: `exec_wire`가 새 2KB 버퍼를 만들고 재귀하는 대신, 명령 문자열을 그 자리에서
-쪼개 처리 함수(`exec_cmd`)를 **직접** 호출하도록 고쳤다 — 버퍼도 재귀도 제거.
+**해결**: 커널 스택을 **8 페이지 = 32 KB** 로 키우고
+(`memlayout.h:55` `#define KSTACK_PAGES 8` — peak 대비 2x 마진), trap 진입 시
+`p->trapframe->kernel_sp = p->kstack + KSTACK_PAGES*PGSIZE` (`trap.c:129`) 로
+스택 top 을 올바르게 가리키게 했다 (커밋 3249dff/a92c219). 더불어 `exec_wire`
+재귀·중복 버퍼도 제거해 프레임 깊이를 줄였다.
 
 ---
 
@@ -1490,7 +1514,7 @@ cd /root/OS_Project/xv6-riscv && make qemu
 
 xv6 셸이 뜨면:
 - `priority_test` — CFS 스케줄러 검증
-- `cache_test`   — LLM 캐시 검증 (10개 테스트)
+- `cache_test`   — LLM 캐시 검증 (13개 테스트)
 
 ---
 
@@ -1758,7 +1782,7 @@ host agent.py 의 _reader 스레드가 "CONFIRM_REQ|" 잡음
    ↓ 답이 y 면 REQ|agent:host|CONFIRM_RES|<pid>|y 송신
    ↓ kernel agentcmd.c 의 handle_confirm_res → confirm_resolve(pid, 1)
 guest 의 confirm_request() 가 wakeup → return 1 → syscalls[num]() 디스패치
-   (n 또는 5초 timeout 이면 -1)
+   (n 또는 15초 timeout 이면 -1)
 ```
 
 #### 11.9.2 v1 의 실패 — kerneltrap panic
@@ -1841,7 +1865,7 @@ agentdemo
 [demo] OK   outside file '/cat' is invisible
 [demo] OK   negative priority denied (no escalation)
 CONFIRM_REQ|5|7|exec                                          ← confirm_request 발화
-[sandbox] pid 5 (agentdemo): syscall 7 denied (confirm-escape)← 5초 timeout 후 deny
+[sandbox] pid 5 (agentdemo): syscall 7 denied (confirm-escape)← 15초 timeout 후 deny
 [demo] OK   exec() blocked by sandbox
 === demo done ===
 $ ls       ← 시스템 안정성 확인
@@ -1852,7 +1876,7 @@ confirmlive                                                    ← 정상 동작
 
 PASS 기준 모두 충족:
 - ✅ `CONFIRM_REQ|<pid>|7|exec` 와이어 출력 (호스트 측 핸들러 트리거 가능)
-- ✅ 호스트 응답 없을 때 5초 timeout 자동 deny → -1
+- ✅ 호스트 응답 없을 때 15초 timeout 자동 deny → -1
 - ✅ `[sandbox] pid X: syscall 7 denied (confirm-escape)` 메시지
 - ✅ `[demo] OK   exec() blocked by sandbox` 도달 — agentdemo 전 단계 통과
 - ✅ **kerneltrap panic 사라짐**
@@ -2393,7 +2417,7 @@ agentd.execute("SPAWN", arg)
        ▼ 호스트:
        CONFIRM_REQ|<pid>|7|exec  ─► agent.py reader → _handle_confirm_req
                                        │
-                                       │  "[jail] pid=X — 5초 내 허용? (y/N)"
+                                       │  "[jail] pid=X — 15초 내 허용? (y/N)"
                                        │  (별도 daemon thread 의 input())
                                        │
                                        ▼ 사용자 y 입력
@@ -2756,23 +2780,31 @@ you ▸
 
 평문 vs `:ask` 의 핵심 차이: **평문은 *대화 메모리* 가 24 턴 유지**, `:ask` 는 1회성. "방금 만든 파일 다시 읽어줘" 같은 *문맥 참조* 는 평문에서만 동작.
 
-### 12.3 도구 verb 9 종
+### 12.3 도구 verb — agentd 디스패치 11종
 
-LLM 이 `{"tool":"<name>","args":{...}}` 로 응답하면 agent.py 가 와이어로 변환해 게스트로 송신:
+LLM 이 `{"tool":"<name>","args":{...}}` 로 응답하면 agent.py 가 와이어로 변환해 게스트로 송신.
+게스트 `agentd` 디스패치 테이블 (`user/agentd.c:36-46`) 의 **11개 도구**:
 
 | Verb | LLM args | 와이어 | 용도 |
 |---|---|---|---|
-| `ls` | `{}` | `LS\|` | jail 안 파일 목록 |
+| `print` | `{"msg":"..."}` | `PRINT\|hi` | xv6 콘솔에 메시지 (디버그용) |
+| `chat` | `{"msg":"..."}` | `CHAT\|...` | 자연어 답변 (도구 불필요할 때) |
 | `read` | `{"file":"..."}` | `READ\|notes.txt` | 파일 내용 읽기 |
 | `write` | `{"file":"...","text":"..."}` | `WRITE\|plan.txt:hello\n` | 파일 생성/덮어쓰기 |
-| `print` | `{"msg":"..."}` | `PRINT\|hi` | xv6 콘솔에 메시지 (디버그용) |
-| `ps` | `{}` | `PS\|` | 프로세스 목록 (pid/state/prio/name) |
+| `ls` | `{}` | `LS\|` | jail 안 파일 목록 |
 | `nice` | `{"pid":N,"priority":0..20}` | `NICE\|5:10` | priority 변경 (음수 거부됨) |
 | `list` | `{}` | `LIST\|` | 게스트 도구 + 우선순위 표 |
+| `setprio` | `{"fn":"...","priority":0..20}` | `SETPRIO\|FN:3` | 도구별 per-function 우선순위 (F8) |
+| `ps` | `{}` | `PS\|` | 프로세스 목록 (pid/state/prio/name) |
 | `help` | `{}` | `HELP\|` | 도구 문법 참조 |
-| `chat` | `{"msg":"..."}` | `CHAT\|...` | 자연어 답변 (도구 불필요할 때) |
+| `spawn` | `{"bin":"...","argv":[...]}` | `SPAWN\|/echo\|echo hi` | fork+exec (confirm-escape 게이트, §11.13) |
 
-**차단된 verb**: `kill`, `exec` — jail 안에서 커널이 `agent_blocked()` 로 막음.
+> `setprio` 는 게스트 `agentd` 안에서만 노출되는 도구로, agent.py `wire_for`
+> 의 호스트측 verb (10종: 위 표에서 `setprio` 제외) 에는 포함되지 않는다.
+
+**차단된 verb**: `kill`, `exec` — 와이어 `KILL` / `EXEC` 는 기본 deny-list (F7) 에서
+enqueue 전에 막히고, 그보다 깊은 `exec`/`kill` syscall 은 jail 안에서 커널
+`agent_blocked()` 가 막는다.
 **입력 제한**: 한 와이어 라인 1200 byte (`WIRE_MAX`). WRITE 의 text 가 길면 분할 필요.
 
 ### 12.4 화면 읽는 법 (색상 cheat sheet)
@@ -2902,7 +2934,7 @@ you ▸ echo "안녕" 프로세스를 만들어줘
    💭 spawn 으로 echo 를 띄워야 한다
    ▶ step 1 · spawn  bin=/echo  argv=['echo', '안녕']
 xv6 ┃ CONFIRM_REQ|7|7|exec                       ← 게스트가 confirm-escape 발화
-[jail] pid=7 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N) y   ← 사용자 입력
+[jail] pid=7 가 위험 syscall 'exec' 호출 요청 — 15초 내 허용? (y/N) y   ← 사용자 입력
 [bridge] CONFIRM_RES → pid=7 y
 xv6 ┃ 안녕                                       ← /echo 실제 실행 결과
 xv6 ┃ [agentd] SPAWN /echo done (status=0)
@@ -2912,7 +2944,7 @@ xv6 ┃ [agentd] SPAWN /echo done (status=0)
 ```
 
 **PASS 기준** (4 가지 모두):
-- `[jail] pid=X — 5초 내 허용? (y/N)` 프롬프트가 *agent.py 자체 터미널* 에 출력
+- `[jail] pid=X — 15초 내 허용? (y/N)` 프롬프트가 *agent.py 자체 터미널* 에 출력
 - y 입력 시 `[bridge] CONFIRM_RES → pid=X y` 송신 메시지
 - 게스트 콘솔에 echo 인자 출력 (`xv6 ┃ <argv>`)
 - `[agentd] SPAWN ... done (status=0)` 정상 종료
@@ -2925,7 +2957,7 @@ xv6 ┃ [agentd] SPAWN /echo done (status=0)
 you ▸ echo "위험한거" 프로세스를 만들어줘
    ▶ step 1 · spawn  bin=/echo  argv=['echo', '위험한거']
 xv6 ┃ CONFIRM_REQ|8|7|exec
-[jail] pid=8 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N) n   ← 사용자 거부
+[jail] pid=8 가 위험 syscall 'exec' 호출 요청 — 15초 내 허용? (y/N) n   ← 사용자 거부
 [bridge] CONFIRM_RES → pid=8 n
 xv6 ┃ [sandbox] pid 8 (agentd): syscall 7 denied (confirm-escape)
 xv6 ┃ [agentd] SPAWN: exec /echo failed
@@ -2940,7 +2972,7 @@ xv6 ┃ [agentd] SPAWN /echo done (status=1)
 - `SPAWN: exec /echo failed` (자식이 exec 못 했다는 직접 증거)
 - echo 의 인자가 게스트 콘솔에 *출력되지 않음* (인자 실행 자체가 없었음)
 
-> **5 초 안 누르면?** 게스트 측 `CONFIRM_TIMEOUT_TICKS = 50` (≈5 초) 후 자동
+> **15 초 안 누르면?** 게스트 측 `CONFIRM_TIMEOUT_TICKS = 150` (≈15 초) 후 자동
 > deny — ⑧ 과 같은 결과. 사용자가 무응답 = 거부.
 
 > **자동 회귀**: `tools/ralph_natlang.py` 의 N8 (y/allow) + N9 (n/deny) 가 위
@@ -2970,7 +3002,7 @@ python3 agent.py
 | ReAct 한 요청 | 최대 8 step (`MAX_STEPS`) | 복잡 작업은 prompt 쪼개기 |
 | 대화 메모리 | 24 턴 (`MAX_HISTORY`) | 길어지면 컨텍스트 손실 |
 | `kill` / `mknod` | jail 의 `agent_blocked()` 가 *confirm-escape* (§11.9) 로 감 — 도구 verb 가 직접 매핑되지 않으므로 자연어 흐름에서 사용자 일회 허용 절차 없이는 발동 불가 | 직접 시험: 게스트 셸에서 `confirm_kill` / `confirm_mknod` 실행 |
-| `exec` (프로세스 생성) | **`spawn` 도구 verb 로 매핑됨** (§11.13) — agentd 가 fork+exec, 자식이 jail 상속 → exec 호출 시 confirm-escape 게이트 trip → 호스트 y/N 프롬프트 | 자연어로 "echo 프로세스를 만들어줘" 같이 요청 → agent.py 가 spawn 도구 호출 → `[jail] pid=X 가 위험 syscall 'exec' 호출 요청 — 5초 내 허용? (y/N)` 가 호스트 터미널에 뜸 |
+| `exec` (프로세스 생성) | **`spawn` 도구 verb 로 매핑됨** (§11.13) — agentd 가 fork+exec, 자식이 jail 상속 → exec 호출 시 confirm-escape 게이트 trip → 호스트 y/N 프롬프트 | 자연어로 "echo 프로세스를 만들어줘" 같이 요청 → agent.py 가 spawn 도구 호출 → `[jail] pid=X 가 위험 syscall 'exec' 호출 요청 — 15초 내 허용? (y/N)` 가 호스트 터미널에 뜸 |
 | `nice` 음수 priority | 커널에서 거부 | 사용자급 priority 만 |
 | 비밀 정보 | prompt 가 xv6 콘솔에도 찍힘 | 패스워드/토큰 입력 금지 |
 | 캐시 영속성 | `/cache.bin` 이 xv6 fs.img 안에 영구 저장 — qemu 재시작 만으로는 안 비워짐 | 진짜 클린은 `make -C xv6-riscv clean && make -C xv6-riscv qemu-agent` (`fs.img` 재생성) |

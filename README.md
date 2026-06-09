@@ -166,7 +166,8 @@ For the fairness benchmark, a single core makes time-sharing clearest:
 
 ```bash
 make clean && make qemu CPUS=1
-$ cfs_bench                # per-priority CPU-share table (numbers in docs/BENCHMARKS.md)
+$ cfs_share 150 0 4 8 12 16 19   # per-priority CPU-share sweep (numbers in docs/BENCHMARKS.md)
+$ cfs_share                      # short form: the default 3-priority race {1,10,19}
 ```
 
 Quit QEMU with `Ctrl-a x`.
@@ -261,7 +262,7 @@ you ▸ lower the priority of process 1 to 19
 The four captures below sit alongside the three already inlined in §5.2 (`spawn`
 allow/deny + `NICE` on `init`) and the one in §5.1 (cache hit) — eight in total,
 all real `solar-pro2` runs through `agent.py`, captured 2026-06-08. The asciinema
-recording recipe and the still-missing GIF / `priority_test` / `cfs_bench`
+recording recipe and the still-missing GIF / `priority_test` / `cfs_share`
 candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
 
 | Prompt the user typed | What the kernel did | Capture |
@@ -288,14 +289,14 @@ candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
 | User → negative-priority escalation / kernel-class demotion | denied |
 | `REQ\|SPAWN\|/echo\|...` | fork+exec inside jail, confirm-escape on exec |
 | F9 `:ask` repeated | MISS then HIT (Solar skipped on hit) |
-| **`tools/ralph_battery.py`** — 26 shell/syscall scenarios (port 5555) | 26/26 PASS |
-| **`tools/ralph_natlang.py`** — 39 natural-language scenarios (mock, port 6666) | 39/39 PASS |
+| **`tools/ralph_battery.py`** — 26 shell/syscall `record()` checks (port 5555) | 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 natural-language `record()` checks (mock, port 6666) | 39/39 PASS |
 | Live Solar ReAct multi-step + memory | ls → read (×N) → summary; the follow-up uses prior context |
 
-Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions across 16 + 17
-scenarios; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
+Cumulative regression **65/65 GREEN** (the 65 counts `record()` assertions, grouped into
+≈16 + ≈17 scenario groups; a few gate on "no panic" rather than behavioral correctness). Both harnesses use
 isolated ports + per-run `fs.img` copies, so they run alongside a live 4444 session.
-Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md).
+Security findings & fixes: [docs/SECURITY.md](docs/SECURITY.md); quantitative eval numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -325,7 +326,7 @@ Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SEC
 ├── agent.py                   host-side ReAct bridge; :ask = F9 cache path
 ├── .env.example               copy to .env, add the Solar key (gitignored)
 ├── docs/                      reports, security/eval, benchmarks, media  (→ docs/README.md)
-├── tools/                     regression harnesses · red-team · bench scripts
+├── tools/                     regression harnesses · red-team · bench · shared qemu_harness.py
 └── xv6-riscv/
     ├── kernel/
     │   ├── proc.{c,h}         CFS weights, vruntime, is_agent / jail_root
@@ -336,7 +337,7 @@ Quantitative security & eval numbers: [docs/SECURITY_AND_EVALUATION.md](docs/SEC
     │   └── sysproc.c          priority guard; agent_recv / cache / dispatch syscalls
     └── user/
         ├── agentd.c           jailed agent worker — tool table + per-fn priority + spawn
-        ├── priority_test.c · cfs_bench.c · cache_test.c · eval.c   tests / benchmarks
+        ├── priority_test.c · cfs_share.c · cache_test.c · eval.c   tests / benchmarks
         └── agent_multi.c · write_race.c                            concurrency / sync demos
 ```
 
@@ -349,10 +350,16 @@ Deep, code-referenced detail: [Implementation.md](Implementation.md).
 - **F6 (JSON deserialization)** runs on the host (`agent.py`); the kernel only accepts a
   validated minimal `REQ|<CMD>|<arg>` format. Rationale (kernel safety, no float/heap in
   xv6, layer separation) is in the report — a deliberate departure from the proposal wording.
-- **Security follow-up** — red-team findings #1·#3·#4 are fixed; **#2** (cache `/cache.bin`
-  resolving through the jail) and **#5** (deny-list default not covering `SPAWN`) are open.
-  See [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md) and the full audit
-  [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+- **Security follow-up** — first-pass findings #1·#3·#4 are fixed. A **second, full-codebase
+  audit (2026-06-09)** then found and fixed three more in previously-unchanged code: a
+  **deny-list bypass** where the `LLM_RESP` / `ASK` cache-hit forward paths reached `agentd`
+  without the deny check (#10, fixed by moving the deny check into the single
+  `forward_wire_to_agentd` chokepoint), **cache-value wire-line forgery** via an embedded
+  newline in a planted value (#11, fixed by sanitizing control bytes at the source in
+  `cache_set`/`disk_scan`), and a **re-jail inode-ref leak** (#12). Still open: **#2** (cache
+  `/cache.bin` resolving through the jail — only the forged-record-feedback half is now
+  mitigated by #11) and **#5** (deny-list default not covering `SPAWN`). See
+  [docs/SECURITY.md](docs/SECURITY.md) (EN overview + full finding register #1–#13).
 - **SMP** — `make qemu-agent` runs single-core to avoid a known kernelvec trap-entry race
   (`scause=0xf`); shell mode (`make qemu`) boots with smp>1.
 - **Solar tokenizer boundary** — a Korean particle abutting a number (e.g. `"22 + 45는?"`)

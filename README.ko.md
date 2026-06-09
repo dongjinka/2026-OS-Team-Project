@@ -160,7 +160,8 @@ $ denyctl list             # F7 — 실효 커널 거부 목록 표시
 
 ```bash
 make clean && make qemu CPUS=1
-$ cfs_bench                # 우선순위별 CPU 점유 표 (수치는 docs/BENCHMARKS.md)
+$ cfs_share 150 0 4 8 12 16 19   # 우선순위별 CPU 점유 스윕 (수치는 docs/BENCHMARKS.md)
+$ cfs_share                      # 짧은 형태: 기본 3-우선순위 경쟁 {1,10,19}
 ```
 
 QEMU 종료는 `Ctrl-a x`.
@@ -249,7 +250,7 @@ you ▸ pid 1 프로세스의 우선순위를 19로 낮춰줘
 아래 4장은 §5.2의 3장(`spawn` 허용/거부 + `init` `NICE` 거부)과 §5.1의 1장(캐시
 hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `agent.py`
 라이브 세션에서 캡처. 녹화 레시피(asciinema + agg)와 아직 안 들어온 GIF /
-`priority_test` / `cfs_bench` 후보는 [`docs/assets/README.md`](docs/assets/README.md).
+`priority_test` / `cfs_share` 후보는 [`docs/assets/README.md`](docs/assets/README.md).
 
 | 사용자가 입력한 프롬프트 | 커널이 한 일 | 캡처 |
 | --- | --- | --- |
@@ -275,14 +276,14 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 | user → 음수 priority 상승 / kernel-class 강등 | 거부 |
 | `REQ\|SPAWN\|/echo\|...` | jail 안 fork+exec, exec에서 confirm-escape |
 | F9 `:ask` 반복 | MISS 후 HIT (히트 시 Solar 생략) |
-| **`tools/ralph_battery.py`** — 26 셸/syscall 시나리오 (포트 5555) | 26/26 PASS |
-| **`tools/ralph_natlang.py`** — 39 자연어 시나리오 (mock, 포트 6666) | 39/39 PASS |
+| **`tools/ralph_battery.py`** — 26 셸/syscall `record()` 체크 (포트 5555) | 26/26 PASS |
+| **`tools/ralph_natlang.py`** — 39 자연어 `record()` 체크 (mock, 포트 6666) | 39/39 PASS |
 | 라이브 Solar ReAct 멀티스텝 + 메모리 | ls → read (×N) → 요약; 후속 요청이 이전 맥락 활용 |
 
-누적 회귀 **65/65 GREEN** (65는 16+17개 시나리오에 걸친 `record()` 단언 수이며, 일부는
+누적 회귀 **65/65 GREEN** (65는 `record()` 단언 수이며, ≈16+≈17개 시나리오 그룹으로 묶인다. 일부는
 동작 정확성보다 "panic 없음" 게이트다). 두 하네스는 격리 포트 + 실행마다 `fs.img` 복사본을
-써서 라이브 4444 세션과 동시 실행된다. 정량 보안·평가 수치:
-[docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md).
+써서 라이브 4444 세션과 동시 실행된다. 보안 발견·수정: [docs/SECURITY.md](docs/SECURITY.md);
+정량 평가 수치: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ---
 
@@ -312,7 +313,7 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 ├── agent.py                   호스트 측 ReAct 브릿지; :ask = F9 캐시 경로
 ├── .env.example               .env로 복사 후 Solar 키 입력 (gitignore)
 ├── docs/                      보고서 · 보안/평가 · 벤치마크 · 미디어  (→ docs/README.md)
-├── tools/                     회귀 하네스 · 레드팀 · 벤치 스크립트
+├── tools/                     회귀 하네스 · 레드팀 · 벤치 · 공용 qemu_harness.py
 └── xv6-riscv/
     ├── kernel/
     │   ├── proc.{c,h}         CFS 가중치, vruntime, is_agent / jail_root
@@ -323,7 +324,7 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
     │   └── sysproc.c          priority 가드; agent_recv / cache / dispatch syscall
     └── user/
         ├── agentd.c           격리 에이전트 워커 — 도구 테이블 + 함수별 priority + spawn
-        ├── priority_test.c · cfs_bench.c · cache_test.c · eval.c   테스트 / 벤치마크
+        ├── priority_test.c · cfs_share.c · cache_test.c · eval.c   테스트 / 벤치마크
         └── agent_multi.c · write_race.c                            동시성 / 동기화 데모
 ```
 
@@ -336,9 +337,13 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 - **F6 (JSON 역직렬화)** 는 호스트(`agent.py`)에서 수행한다. 커널은 검증된 최소
   `REQ|<CMD>|<arg>` 형식만 받는다. 근거(커널 안전, xv6의 부동소수점·힙 부재, 레이어 분리)는
   보고서에 — 제안서 문구로부터의 의도적 이탈이다.
-- **보안 후속** — 레드팀 #1·#3·#4는 수정 완료, **#2**(캐시 `/cache.bin`의 jail 해석) ·
-  **#5**(거부 목록 기본값이 `SPAWN` 미커버)는 오픈. [docs/SECURITY_AND_EVALUATION.md](docs/SECURITY_AND_EVALUATION.md)
-  와 전체 감사 [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md) 참조.
+- **보안 후속** — 1차 #1·#3·#4 수정 완료. **2차 전체-코드 감사(2026-06-09)**에서
+  미변경 기존 코드의 3건을 추가 발견·수정: **deny-list 우회**(`LLM_RESP`/`ASK` 캐시-히트
+  포워딩이 deny 검사 없이 `agentd` 도달 → #10, deny 검사를 `forward_wire_to_agentd`
+  단일 chokepoint로 일원화), **캐시값 wire 라인 위조**(심은 값의 개행 주입 → #11,
+  `cache_set`/`disk_scan` 출처 정화), **재-jail inode ref 누수**(#12). 오픈: **#2**(캐시
+  `/cache.bin`의 jail 해석 — 위조-되먹임 절반만 #11로 완화) · **#5**(거부 목록 기본값이
+  `SPAWN` 미커버). [docs/SECURITY.md](docs/SECURITY.md) (EN 개요 + 전체 발견 등록부 #1–#13) 참조.
 - **SMP** — `make qemu-agent`는 알려진 kernelvec 트랩 진입 race(`scause=0xf`)를 피해
   단일 코어로 돈다. 셸 모드(`make qemu`)는 smp>1로 부팅.
 - **Solar 토크나이저 경계** — 한글 조사가 숫자에 붙으면(예: `"22 + 45는?"`) 토큰이 누락될

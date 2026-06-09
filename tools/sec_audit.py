@@ -3,9 +3,10 @@
 sec_audit.py — head-less red-team harness for the SECURITY_AUDIT findings.
 
 Boots an isolated xv6/qemu instance (smp=1, dedicated TCP serial port, a
-private fs.img copy) and runs reproducer programs that exercise *existing*
-syscalls to demonstrate each finding. It changes NO kernel code: each scenario
-just reports whether the kernel currently allows the abuse.
+private fs.img copy — all via tools/qemu_harness.py) and runs reproducer
+programs that exercise *existing* syscalls to demonstrate each finding. It
+changes NO kernel code: each scenario just reports whether the kernel currently
+allows the abuse.
 
     RESULT=VULNERABLE  -> the hole exists on this build (expected on main today)
     RESULT=SAFE        -> the corresponding fix is in place
@@ -21,105 +22,44 @@ session or the ralph_* harnesses.
 Usage:  python3 tools/sec_audit.py
 Build first:  (cd xv6-riscv && make kernel/kernel fs.img)
 """
-import os, sys, socket, time, threading, subprocess, shutil
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from qemu_harness import QemuHarness
 
-HERE     = os.path.dirname(os.path.abspath(__file__))
-ROOT     = os.path.dirname(HERE)
-XV6      = os.path.join(ROOT, "xv6-riscv")
-KERNEL   = os.path.join(XV6, "kernel", "kernel")
-FS_SRC   = os.path.join(XV6, "fs.img")
-FS_COPY  = "/tmp/fs_sec_audit.img"
-LOG      = "/tmp/sec_audit_qemu.log"
-HOST     = "127.0.0.1"
-PORT     = 5557
+FS_COPY = "/tmp/fs_sec_audit.img"
+LOG     = "/tmp/sec_audit_qemu.log"
+PORT    = 5557
 
 def info(msg): print(f"[sec] {msg}", flush=True)
 
-# ---------- qemu lifecycle ----------
-def stop_existing():
-    subprocess.run(["pkill", "-f", f"tcp:{HOST}:{PORT}"], check=False)
-    time.sleep(0.4)
-
-def start_qemu():
-    if not os.path.exists(KERNEL) or not os.path.exists(FS_SRC):
-        sys.exit(f"[sec] build first: (cd xv6-riscv && make kernel/kernel fs.img)\n"
-                 f"      missing {KERNEL if not os.path.exists(KERNEL) else FS_SRC}")
-    shutil.copy(FS_SRC, FS_COPY)
-    cmd = [
-        "qemu-system-riscv64", "-machine", "virt", "-bios", "none",
-        "-kernel", KERNEL, "-m", "128M", "-smp", "1",
-        "-global", "virtio-mmio.force-legacy=false",
-        "-drive", f"file={FS_COPY},if=none,format=raw,id=x0",
-        "-device", "virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0",
-        "-display", "none",
-        "-serial", f"tcp:{HOST}:{PORT},server",
-    ]
-    logf = open(LOG, "w")
-    p = subprocess.Popen(cmd, stdout=logf, stderr=logf, start_new_session=True)
-    info(f"qemu pid={p.pid} (smp=1, port {PORT})")
-    time.sleep(1.0)
-    return p
-
-# ---------- transcript ----------
-buf = []
-buf_lock = threading.Lock()
-stop = {"q": False}
-
-def reader(s):
-    while not stop["q"]:
-        try:
-            d = s.recv(4096)
-            if not d: break
-            with buf_lock:
-                buf.append(d.decode(errors="replace"))
-        except socket.timeout:
-            continue
-        except Exception:
-            break
-
-def transcript():
-    with buf_lock:
-        return "".join(buf)
-
-def wait_for(needle, timeout=20.0):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        if needle in transcript():
-            return True
-        time.sleep(0.1)
-    return False
-
-def send(line, settle=0.3):
-    s_global.sendall((line + "\n").encode())
-    time.sleep(settle)
-
-FATAL = ["panic:", "kerneltrap", "scause="]
-
 # ---------- scenarios ----------
-# Each scenario: (id, description, shell_cmd, run_then_classify(transcript_tail))
-# classify returns ("VULNERABLE"|"SAFE"|"ERROR", detail).
-def run_secnice():
+# Each scenario fn(h) drives the guest and returns
+# ("VULNERABLE"|"SAFE"|"INCONCLUSIVE"|"ERROR", detail).
+def run_secnice(h):
     """#3 — jailed agent reniceing a non-self process."""
-    base = len(transcript())
-    send("secnice")
-    if not wait_for("SECNICE: RESULT=", timeout=25.0):
+    base = len(h.transcript())
+    h.send("secnice")
+    if not h.wait_for("SECNICE: RESULT=", timeout=25.0):
         return ("ERROR", "no RESULT marker (timeout)")
-    tail = transcript()[base:]
+    tail = h.transcript()[base:]
     if "RESULT=VULNERABLE" in tail:
         # pull the rc/prio line for the report
         line = next((l for l in tail.splitlines() if "rc=" in l), "")
         return ("VULNERABLE", line.strip())
     if "RESULT=SAFE" in tail:
         return ("SAFE", "jailed setpriority on non-self denied")
+    if "RESULT=INCONCLUSIVE" in tail:
+        line = next((l for l in tail.splitlines() if "INCONCLUSIVE" in l), "")
+        return ("INCONCLUSIVE", line.strip() or "victim not live at attack time")
     return ("ERROR", "marker present but unclassified")
 
-def run_secconfirm():
+def run_secconfirm(h):
     """#1 — jailed agent self-approving its own confirm-escape via dispatch."""
-    base = len(transcript())
-    send("secconfirm")
-    if not wait_for("SECCONFIRM: RESULT=", timeout=30.0):
+    base = len(h.transcript())
+    h.send("secconfirm")
+    if not h.wait_for("SECCONFIRM: RESULT=", timeout=30.0):
         return ("ERROR", "no RESULT marker (timeout)")
-    tail = transcript()[base:]
+    tail = h.transcript()[base:]
     line = next((l for l in tail.splitlines()
                  if "SECCONFIRM:" in l and "RESULT=" in l), "")
     if "RESULT=VULNERABLE" in tail:
@@ -134,44 +74,36 @@ SCENARIOS = [
 ]
 
 # ---------- main ----------
-results = []
-qproc = None
-try:
-    stop_existing()
-    qproc = start_qemu()
-    s_global = socket.create_connection((HOST, PORT), timeout=20.0)
-    s_global.settimeout(0.2)
-    threading.Thread(target=reader, args=(s_global,), daemon=True).start()
+def main():
+    results = []
+    with QemuHarness(port=PORT, fs_copy=FS_COPY, log=LOG, tag="sec") as h:
+        h.start()
+        if not h.wait_boot():
+            sys.exit("[sec] shell never came up — see " + LOG)
+        info("shell up")
 
-    if not wait_for("init: starting sh", timeout=25.0) and not wait_for("$ ", timeout=5.0):
-        sys.exit("[sec] shell never came up — see " + LOG)
-    info("shell up")
-    time.sleep(0.5)
+        for sid, desc, fn in SCENARIOS:
+            verdict, detail = fn(h)
+            results.append((sid, desc, verdict, detail))
+            info(f"{sid}: {verdict}  ({detail})")
 
-    for sid, desc, fn in SCENARIOS:
-        verdict, detail = fn()
-        results.append((sid, desc, verdict, detail))
-        info(f"{sid}: {verdict}  ({detail})")
+        fatal = h.fatal_seen()
+        print("\n==================== SEC AUDIT SUMMARY ====================", flush=True)
+        for sid, desc, verdict, detail in results:
+            print(f"  [{verdict:<12}] {sid:<10} {desc}", flush=True)
+            if detail:
+                print(f"               {detail}", flush=True)
+        if fatal:
+            print(f"  [FATAL] kernel marker(s) seen: {fatal}", flush=True)
+        print("==========================================================", flush=True)
+        print("VULNERABLE = hole present on this build (expected on main; flips to "
+              "SAFE after the matching fix).", flush=True)
 
-    fatal = [m for m in FATAL if m in transcript()]
-    print("\n==================== SEC AUDIT SUMMARY ====================", flush=True)
-    for sid, desc, verdict, detail in results:
-        print(f"  [{verdict:<10}] {sid:<10} {desc}", flush=True)
-        if detail:
-            print(f"               {detail}", flush=True)
-    if fatal:
-        print(f"  [FATAL] kernel marker(s) seen: {fatal}", flush=True)
-    print("==========================================================", flush=True)
-    print("VULNERABLE = hole present on this build (expected on main; flips to "
-          "SAFE after the matching fix).", flush=True)
+        # Exit non-zero only on harness/kernel failure (FATAL, ERROR, or an
+        # INCONCLUSIVE race that needs a re-run) — never on a VULNERABLE verdict,
+        # which is the expected, successful outcome of a red-team run.
+        bad = any(v in ("ERROR", "INCONCLUSIVE") for _, _, v, _ in results)
+        sys.exit(1 if (fatal or bad) else 0)
 
-    # Exit non-zero only on harness/kernel failure, not on a VULNERABLE verdict
-    # (a reproduced vuln is the expected, successful outcome of a red-team run).
-    sys.exit(1 if (fatal or any(v == "ERROR" for _, _, v, _ in results)) else 0)
-finally:
-    stop["q"] = True
-    if qproc:
-        try:
-            os.killpg(os.getpgid(qproc.pid), 9)
-        except Exception:
-            pass
+if __name__ == "__main__":
+    main()

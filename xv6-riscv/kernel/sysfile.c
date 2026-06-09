@@ -457,6 +457,8 @@ sys_jail(void)
   }
   iunlock(ip);
   iput(p->cwd);          // drop the old cwd; the jail dir replaces it
+  if(p->jail_root)       // re-jail (jail() is not in agent_blocked): release the
+    iput(p->jail_root);  // previous jail root so its inode ref is not leaked
   end_op();
 
   p->jail_root = idup(ip);  // separate ref, released in kexit()

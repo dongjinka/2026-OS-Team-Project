@@ -14,6 +14,91 @@
 
 ## [Unreleased]
 
+### Fixed (2026-06-09 — server3342)
+- **kernel/trap.c** — `usertrapret`의 `kernel_sp`를 `p->kstack + PGSIZE`에서
+  `p->kstack + KSTACK_PAGES*PGSIZE`로 수정. 기존엔 `context.sp`(forkret 경로)만
+  8페이지 스택 꼭대기를 가리키고 유저 모드 트랩 진입 경로는 4KB 스택에 머물러,
+  깊은 agent/spawn 체인이 가드 페이지로 넘어가 `scause=0xf`를 냈다 — KSTACK_PAGES
+  확장이 실제 트랩 경로에 도달하도록 일치시킴.
+- **kernel/agentcmd.c** — 캐시 HIT 출력 버퍼를 `valbuf[1025]`로 키우고
+  `cache_get(..., sizeof(valbuf)-1)` 호출. 정확히 1024바이트(CACHE_VAL) 값의
+  마지막 바이트가 NUL로 덮여 잘리던 off-by-one 제거(원자적 단일 printf는 유지).
+- **user/secnice.c** — F3 레드팀 판정을 3-way(VULNERABLE/SAFE/INCONCLUSIVE)로
+  보강: victim이 공격 전에 종료해 `setpriority`가 -1을 반환하는 레이스를
+  '가드에 의한 거부(SAFE)'와 구분 → 취약 빌드에서의 거짓 SAFE 제거.
+- **kernel/console.c** — confirm-escape **와이어 프레이밍 레이스** 수정. `REQ|`
+  명령의 프리픽스를 바이트마다 echo하던 정책이, agentd의 `confirm_request()`
+  printf와 UART 인터럽트 *사이*에서 interleave해 `REQ|CONFIRM_REQ|<pid>|...`로
+  깨졌고, 호스트가 `CONFIRM_REQ|` 접두를 인식 못 해 프롬프트가 안 뜨고 15초
+  타임아웃 deny되던 문제. REQ| 라인은 프리픽스 echo를 보류(분기 시 flush)하고
+  종결자만 발신하도록 변경 — CONFIRM_REQ·RESP|HIT·`__OBS` 등 모든 호스트-매칭
+  라인 보호. 재현: `tools/confirm_frame.py` 수정 전 6/30 VULNERABLE → 후 0/30 SAFE.
+- **agent.py** — confirm 프롬프트 호스트 처리 강화: (a) `_parse_confirm_req`로
+  깨진 프리픽스 복구(이중 방어), (b) 프롬프트 동안 reader 라이브 출력 보류 +
+  `select` 15초 제한으로 좀비 reader가 다음 REPL 입력을 가로채던 문제 제거,
+  (c) `_read_line`이 confirm 활성 중 stdin 양보(동시 독자 제거).
+- **kernel/confirm.c** — 헤더 주석의 노후 "5초" timeout을 실제 "15초(150 ticks)"로 정정.
+- **문서 사실 정합성 패스** — 코드/git 히스토리 대조로 6개 문서의 불일치 ~21건 수정:
+  `docs/Technical_Report.md`(semantic 임계 0.7→0.40, #3/#4 상태, agentq 락 종류 등),
+  `Project_Guide.md`(5초→15초, 4KB→32KB 스택, deny-list 게이트 귀속, CFS 식, 디스크
+  ~4,000, 액션 11개, 라인 재고정), `Implementation.md`(confirm 와이어 pid-first +
+  시그니처 + 라인 재고정), `CHANGELOG.md`(eab475d 날짜 2026-05-11),
+  `docs/Development_Process.md`(부재 브랜치/`README.en.md` 참조 정정),
+  `README.md`/`README.ko.md`(§6 시나리오/체크 라벨 정리), `CLAUDE.md`(`eval semantic` 추가).
+
+### Added (2026-06-09 — server3342)
+- **tools/confirm_frame.py** (신규) — confirm 프레이밍 레이스 qemu 재현기(포트 5559):
+  spawn→confirm 스트레스 후 원시 transcript에서 깨진 `CONFIRM_REQ` 검출
+  (`VULNERABLE`/`SAFE`). 격리 포트 + fs 복사본이라 4444 세션과 병행 가능.
+- **tools/confirm_wire.py** (신규) — `agent._parse_confirm_req()` 호스트 단위 테스트
+  (qemu 불필요): `RCONFIRM_REQ|...` 등 프리픽스 깨짐을 복구하는지 검증.
+- **tools/confirm_tty.py** (신규) — pty 기반 **대화형** confirm 입력 경로
+  (`_read_confirm_answer`의 `select`+`os.read` 분기) 단위 테스트(허용/거부/타임아웃/부분입력).
+- **docs/UNIT_IO_MATRIX.md** (신규) — 에이전트 명령 경로 단위기능별 입력→기대출력→
+  검증 하네스 매트릭스(15개 단위, 13 실행검증 + 2 코드트레이스).
+
+### Changed (2026-06-09 — server3342)
+- **user/cfs_share.c** — argv(`cfs_share <ticks> <prio>...`)로 파라미터화하고
+  머신 파싱용 `CFSBENCH` 마커를 함께 출력하도록 일반화하여 기존 `cfs_bench.c`를
+  흡수. 인자 없이 실행하면 기존 3-우선순위 기본 race 동작을 유지.
+- **tools/qemu_harness.py** (신규) — qemu 부트 + 시리얼 reader/wait_for/send/
+  FATAL 처리 스캐폴딩을 공용 모듈로 추출. `tools/sec_audit.py`·`tools/bench_report.py`
+  를 이 모듈 사용으로 재작성(3중 복붙 제거, `with` 컨텍스트 매니저 채택).
+- **agent.py** — `_wrap_display` 하드브레이크를 글자마다 prefix를 재측정하던
+  O(n²)에서 표시 폭을 증분 추적하는 단일 선형 패스로 개선.
+- **kernel/param.h · cache.c · agentcmd.c** — 캐시값 크기 `CACHE_VAL(1024)`을
+  `param.h` 공유 상수로 승격(기존 `cache.c` 로컬 정의 제거). agentcmd.c의 HIT 버퍼는
+  `valbuf[CACHE_VAL+1]` / `cache_get(..., sizeof-1)`로 단일 소스화 — 매직넘버 드리프트 제거.
+- **tools/bench_report.py** — 모듈-레벨 `info()`를 `QemuHarness.info`(동일 `[bench]`→stderr)로
+  통일해 중복 제거.
+- 문서(README·README.ko·docs/BENCHMARKS·docs/SECURITY_AND_EVALUATION·
+  docs/assets/README)의 `cfs_bench` 참조를 `cfs_share`로 갱신.
+- **문서 정리/통합** — `docs/SECURITY_AND_EVALUATION.md`(EN)와 `docs/SECURITY_AUDIT.md`(KR)를
+  단일 [`docs/SECURITY.md`](docs/SECURITY.md)(§1 EN 개요 + §2 KR 전체 발견 등록부)로 병합;
+  평가 수치는 이미 `docs/BENCHMARKS.md`에 있어 중복 제거. `Weekly_Development_Process.md`는
+  `docs/Development_Process.md` §3·§5가 EN으로 전부 커버하므로 삭제. `plan.md`는 2026-05-18
+  스냅샷으로 아카이브 헤더 표기. 모든 교차참조/인덱스(`docs/README.md`)·README §8의
+  `qemu_harness.py` 누락을 갱신. 코드 대조로 기술 주장 재검증(14/15 정확 → 노후 1건 수정).
+  순감: 17 → 15 `.md`.
+
+### Security (2026-06-09 — server3342)
+2차 **전체-코드 감사**(diff 아닌 코드베이스 전체 sweep)에서 미변경 기존 코드의
+취약점을 발견·수정. 상세는 [docs/SECURITY.md](docs/SECURITY.md) §2-2(#10–#13).
+- **deny-list 우회 (#10, HIGH)** — `handle_llm_resp`·`handle_ask` 정확-캐시-히트가
+  `forward_wire_to_agentd`를 deny 검사 없이 호출해 `REQ|LLM_RESP|<cmd>` / `CACHE_SET`→`ASK`
+  재생으로 deny된 명령이 agentd 도달. deny 검사를 `forward_wire_to_agentd` **단일
+  chokepoint**로 이동해 모든 포워딩 경로를 일원 검사.
+- **캐시값 wire 라인 위조 (#11, HIGH)** — 심은 캐시값의 개행이 `RESP|HIT` printf /
+  agentd 포워딩에서 그대로 방출돼 두 번째 라인 위조. `cache_set`·`disk_scan`에서
+  제어문자를 출처 정화 + chokepoint에서 `\n`/`\r` 차단(이중 방어).
+- **재-jail inode ref 누수 (#12, LOW)** — `sys_jail`이 재할당 전 이전 `jail_root`를 `iput`.
+- **WRITE 파일명 `:` 오분할 (#13, LOW)** — `agent.py wire_for`가 `:` 포함 파일명을 거부.
+- 회귀 무영향 검증: `ralph_battery` 26/26 · `sec_audit` SAFE/SAFE · 캐시 50% hit · 빌드 clean.
+
+### Removed (2026-06-09 — server3342)
+- **user/cfs_bench.c** — 파라미터화된 `cfs_share.c`로 통합되어 삭제(Makefile
+  `UPROGS`에서도 제거).
+
 ### Added (2026-06-08 — June)
 - **데모 캡처 8장** `docs/assets/`에 추가 — 모두 `solar-pro2` 라이브
   agent-mode 세션 실제 출력:
@@ -296,8 +381,8 @@
 
 이전 커밋들은 `git log --oneline`으로 조회. 주요 마일스톤:
 
-- `eab475d` (2026-04) docs: 코스 요구사항 문서 추가
-- `08157c9` chore: 주간 개발 진행 사항 업데이트
+- `eab475d` (2026-05-11) docs: 코스 요구사항 문서 추가
+- `08157c9` (2026-05-11) chore: 주간 개발 진행 사항 업데이트
 - 그 외 초기 셋업 커밋들
 
 ---
