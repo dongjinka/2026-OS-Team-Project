@@ -265,7 +265,7 @@ int is_agent;             // F7: sandboxed agent process
 struct inode *jail_root;  // F7: chroot jail root inode (0 = no jail)
 ```
 
-**신규 `jail(path)` 시스템 콜** ([sysfile.c:439-465](xv6-riscv/kernel/sysfile.c)):
+**신규 `jail(path)` 시스템 콜** ([sysfile.c:441-466](xv6-riscv/kernel/sysfile.c)):
 호출자를 path에 영구 가둔다. `is_agent=1` 설정. **되돌릴 수 없음** —
 deliberately no "unjail".
 
@@ -426,7 +426,7 @@ write 충돌 제거. 색 구분:
 
 | 항목 | 변경 |
 |------|------|
-| `_cache_lookup` strip 정규화 | lookup key에 `.strip()` 추가 ([agent.py:1000](agent.py)). store 키와 정합 → 동일 prompt 가 2번째부터 `[cache HIT]` (Issue A). |
+| `_cache_lookup` strip 정규화 | lookup key에 `.strip()` 추가 ([agent.py:995](agent.py)). store 키와 정합 → 동일 prompt 가 2번째부터 `[cache HIT]` (Issue A). |
 | SYSTEM_PROMPT ★ token-boundary | spawn 블록 내부 → standalone clause로 분리. chat/write/print/spawn 모든 도구에 한글/CJK byte 보존, 숫자 drop 금지 신호 (Issue B mitigation — Solar tokenizer가 `"22 + 45는?"`에서 `45` drop하던 회귀 완화). |
 | `_handle_confirm_req` | 프롬프트 "5초"→"15초" 정정, `input()` 직전 `termios.tcflush(TCIFLUSH)`로 stale stdin enter 제거. |
 | `_read_line` cooked 모드 기본 | raw 모드(`_wipe_input`/`_draw_input`)에서 한글 입력시 4-5회 키 입력이 필요한 UX 회귀 → cooked 기본. raw는 `AGENT_RAW_INPUT=1` opt-in. |
