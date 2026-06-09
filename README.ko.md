@@ -3,6 +3,7 @@
 **2026 운영체제 · 팀 텀 프로젝트 · Direction A (OS for LLM).**
 자연어가 키보드이고, 커널이 신뢰 경계다.
 
+> **발표 슬라이드 (라이브):** <https://dongjinka.github.io/2026-OS-Team-Project/>
 > English README: [README.md](README.md)
 
 **xv6-riscv** 교육용 커널을 확장해 LLM 에이전트(Upstage Solar)를 **호스팅·스케줄링·
@@ -360,7 +361,7 @@ hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `
 | 1 | **Application** + 소스 + how-to-run | 이 README + [README.md](README.md)(EN) + 저장소 |
 | 2 | **Technical Report** | [docs/Technical_Report.md](docs/Technical_Report.md) |
 | 3 | **Development Process** | [docs/Development_Process.md](docs/Development_Process.md) |
-| 4 | **Presentation Slides** (영어) | `slides/` *(추가 예정)* |
+| 4 | **Presentation Slides** (영어) | **[라이브 덱 →](https://dongjinka.github.io/2026-OS-Team-Project/)** · 소스 `slides/OS for LLM.html` |
 
 전체 문서 지도: [docs/README.md](docs/README.md) — 보고서, 보안 감사, 벤치마크, 한글
 레퍼런스(Implementation · Project_Guide · CHANGELOG)로 라우팅.

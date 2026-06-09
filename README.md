@@ -3,6 +3,7 @@
 **2026 Operating Systems · team term project · Direction A (OS for LLM).**
 Natural language is the keyboard; the kernel is the trust boundary.
 
+> **Live presentation deck:** <https://dongjinka.github.io/2026-OS-Team-Project/>
 > 한국어 README: [README.ko.md](README.ko.md)
 
 We extend the **xv6-riscv** teaching kernel so it can **host, schedule, sandbox, and
@@ -373,7 +374,7 @@ Deep, code-referenced detail: [Implementation.md](Implementation.md).
 | 1 | **Application** + source + how-to-run | this README + [README.ko.md](README.ko.md) + repository |
 | 2 | **Technical Report** | [docs/Technical_Report.md](docs/Technical_Report.md) |
 | 3 | **Development Process** | [docs/Development_Process.md](docs/Development_Process.md) |
-| 4 | **Presentation Slides** (English) | `slides/` *(to be added)* |
+| 4 | **Presentation Slides** (English) | **[Live deck →](https://dongjinka.github.io/2026-OS-Team-Project/)** · source `slides/OS for LLM.html` |
 
 Full documentation map: [docs/README.md](docs/README.md) — routes to the reports, the
 security audit, the benchmarks, and the Korean reference docs (Implementation · Project_Guide ·
