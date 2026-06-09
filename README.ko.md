@@ -196,6 +196,11 @@ python3 agent.py
 
 ## 5. 데모
 
+> **End-to-end 데모 영상 (Google Drive)** — <https://drive.google.com/file/d/14ruIXM-Lg6nP3BLTjsIWOrV68E5yUNgK/view?usp=drive_link>
+> `solar-pro2` 라이브 에이전트 모드 한 세션: 자연어 → 커널 경로 전체를 — 캐시
+> 히트, `spawn` confirm-escape 허용/거부, jail 안 `NICE`로 init 변경 거부,
+> 파일 WRITE/READ + 대화 메모리, `PS`의 `[K]`/`[A]` 클래스 마커 — 모두 시연.
+
 아래 트랜스크립트는 모두 **실제 실행 출력**이다(`solar-pro2`, smp=1).
 
 ### 5.1 반복 질문 → 커널 캐시 히트

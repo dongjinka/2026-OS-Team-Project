@@ -1803,6 +1803,13 @@ scause=0xf  sepc=0x80005e94  stval=0x3fffff8000
 panic: kerneltrap
 ```
 
+> **2026-06-05 갱신 (PR #15 / `3249dff`):** 본 절에 기록된 *agent/spawn 경로
+> 의 deep exec chain overflow* 는 **per-process 커널 스택을 4 KB → 32 KB로
+> 확대**(`KSTACK_PAGES 8`)해 해소. **단, `smp>1` 에서 발생하는 *kernelvec
+> trap-entry race* 는 별개 원인이고 여전히 존재** — `CLAUDE.md` 가 명시한
+> 대로 `make qemu-agent` 는 `smp=1` 강제이고 의도된 것이다. 본 절은 진단
+> 과정·근본 원인 추적의 사료로 보존.
+
 - `scause=0xf` → Store/AMO page fault (커널 모드에서 쓰기 폴트)
 - `sepc=0x80005e94` → kernelvec 의 `sd gp, 16(sp)` (트랩 진입 후 레지스터 저장 명령)
 - `stval=0x3fffff8000` → 유저 영역 스택포인터 같은 값

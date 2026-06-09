@@ -14,6 +14,36 @@
 
 ## [Unreleased]
 
+### Added (2026-06-09 — June)
+- **End-to-end 데모 비디오 (Google Drive) 링크** — `README.md` §5 + `README.ko.md` §5
+  헤더에 배너로 박음 + `docs/assets/README.md` 인덱스에도 외부 미디어로 표시.
+  한 세션에 캐시 HIT · `spawn` confirm-escape allow/deny · `NICE` init 거부 ·
+  WRITE/READ + 대화 메모리 · `PS` `[K]`/`[A]` 마커 모두 시연. `Project_requirements`
+  §3 *"demo screenshots and/or short demo video/GIF"* 의 video 측면도 충족.
+
+### Changed (2026-06-09 — June, 보고서 정합 ralph 검토 후 검증된 부분만 반영)
+- **`docs/Development_Process.md`** — §1 Roles의 June 행에 *"2026-06-08
+  (`70858a0`) 데모 캡처 8장 + README/Tech Report 인라인"* 과 *"2026-06-09
+  end-to-end 데모 비디오 링크 + post-PR-#12 변경 정확성 검토"* 추가.
+  SeungBeom 행에 *"06-04 (PR #13) audit fixes #1·#3·#4 + 06-09 (PR #17/#18)
+  대형 문서 정합 (SECURITY.md 통합·UNIT_IO_MATRIX.md/CLAUDE.md 신설·Weekly
+  archive)"* 추가. Dongjin 행에 *"06-05 (PR #15) README EN-primary 재구축 +
+  agent.py 사용자 언어 응답 + 커널 스택 4 KB → 32 KB (`KSTACK_PAGES 8`)"*
+  추가. §3 Timeline Week 14 행에 *"2026-06-09 (June) — 데모 비디오 +
+  정확성 검토"* 한 줄 추가 (header 정책 "snapshot through PR #12 + 이후는
+  CHANGELOG"는 유지하되, *각 멤버의 PR #12 이후 작업 한 줄 요약*만 Roles
+  표에 명시해 한 눈에 보이도록).
+- **`Implementation.md`** header — 골격은 05-31 그대로 두되 "**최신 갱신
+  (2026-06-09)**" 절을 추가해 main에 들어와 있는 코드 변경(PR #13/#14 audit
+  guards · PR #15 `KSTACK_PAGES 8` = 32KB · PR #17/#18 정리) 명시.
+  ⚠ `CLAUDE.md` 정책에 따라 *"smp>1 kernelvec trap-entry race는 32KB와 별개,
+  여전히 존재"* 도 함께 적시 — 32KB stack을 SMP race 해소로 *오해하지 않도록*.
+- **`Project_Guide.md` §11.10** (`scause=0xf` `kerneltrap` 진단 절) — PR #15
+  `3249dff`가 *agent/spawn deep exec chain overflow*는 32KB stack(`KSTACK_PAGES 8`)
+  으로 해소했음을 명시. **단, `smp>1` kernelvec trap-entry race는 별개로 여전히
+  존재** ((`CLAUDE.md`가 `make qemu-agent` `smp=1` 강제를 의도된 것으로 못 박음)
+  도 함께 표기 — 두 가지 다른 `scause=0xf`를 혼동하지 않도록.
+
 ### Docs (2026-06-09 — server3342)
 - **문서 정리/통합** — `docs/SECURITY_AND_EVALUATION.md`(EN)와 `docs/SECURITY_AUDIT.md`(KR)를
   단일 [`docs/SECURITY.md`](docs/SECURITY.md)(§1 EN 개요 + §2 KR 전체 발견 등록부 #1–#9)로 병합;

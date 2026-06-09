@@ -13,6 +13,21 @@ xv6 커널에 직접 매핑했다.
 > 본 문서는 **현재 구현된 아키텍처**를 코드 기준으로 기술한다. 작업 진행 상태·
 > 남은 일·평가 지표는 [plan.md](plan.md)를, 변경 이력은 [CHANGELOG.md](CHANGELOG.md)를
 > 참고할 것.
+>
+> **최신 갱신 (2026-06-09):** 골격은 05-31 시점(`b51938a`) 그대로이며, 이후
+> main에 들어온 코드 변경도 모두 반영된 상태:
+> **PR #13/#14** (`8c51926`/`143d0cc`, 06-04) — audit fixes:
+> `sys_dispatch`의 `is_agent` 가드(#1) + `sys_setpriority`의 `is_agent && pid != self`
+> 가드(#3) + `agent.py:wire_for`가 `read`/`write` 파일명·`spawn` argv를
+> `_wire_escape` 통과(#4).
+> **PR #15** (`a1436cb`, 06-05) — `kernel/memlayout.h`에서 **per-process 커널
+> 스택 4 KB → 32 KB** (`KSTACK_PAGES 8`, `3249dff`)로 agent/spawn 경로의
+> *exec 체인 overflow* 해소; `agent.py`가 사용자 질문 언어로 응답(`bfae744`).
+> **PR #17/#18** (`559a9e1`/`b6e934d`, 06-09) — `agent_multi`/`cfs_*` 등에서
+> in-flight 코드 변경을 70858a0으로 revert하고 정리된 문서만 유지
+> (`docs/SECURITY.md` 통합, `docs/UNIT_IO_MATRIX.md`/`CLAUDE.md` 신설).
+> ⚠️ **`CLAUDE.md` 정책:** `smp>1`에서 발생하는 *kernelvec trap-entry race* 는
+> 32KB stack과 별개이며 여전히 존재 — `make qemu-agent`는 의도적으로 `smp=1` 강제다.
 
 ---
 

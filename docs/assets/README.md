@@ -2,8 +2,12 @@
 
 루트 [`README.md`](../../README.md) §5 / [`README.ko.md`](../../README.ko.md) §5에서
 인라인하는 데모 캡처 폴더다. **2026-06-08 캡처 8장이 들어 있고**, 모두
-`mode: solar (solar-pro2)`, smp=1, agent mode 실제 세션 출력이다. asciinema
-GIF·`priority_test` 화면·`cfs_bench` 화면은 아직 안 들어왔다(아래 "추가 후보").
+`mode: solar (solar-pro2)`, smp=1, agent mode 실제 세션 출력이다.
+
+**전체 end-to-end 영상** (외부, Google Drive):
+<https://drive.google.com/file/d/14ruIXM-Lg6nP3BLTjsIWOrV68E5yUNgK/view?usp=drive_link>
+— 아래 8장 시연이 한 세션 안에 모두 등장. `priority_test` / `cfs_bench` 콘솔
+캡처는 아직 안 들어왔다(아래 "추가 후보").
 
 ## 인덱스 (2026-06-08)
 
@@ -20,9 +24,11 @@ GIF·`priority_test` 화면·`cfs_bench` 화면은 아직 안 들어왔다(아�
 
 ## 추가 후보 (아직 없음)
 
+End-to-end **비디오**는 Google Drive에 올라가 있다(위 링크). 아래 둘은
+콘솔 캡처가 추가되면 좋은 항목:
+
 | 파일 | 어떻게 |
 | --- | --- |
-| `agent-demo.gif` | `make qemu-agent` + `python3 agent.py` 세션 녹화 (asciinema) |
 | `priority-test.png` | `make qemu` → `priority_test` |
 | `cfs-bench.png` | `make qemu CPUS=1` → `cfs_bench` |
 

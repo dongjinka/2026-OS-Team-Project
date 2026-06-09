@@ -203,6 +203,11 @@ applies the persisted deny-list. Every tool the LLM calls executes inside that j
 
 ## 5. Demo
 
+> **Full end-to-end demo video (Google Drive)** — <https://drive.google.com/file/d/14ruIXM-Lg6nP3BLTjsIWOrV68E5yUNgK/view?usp=drive_link>
+> One live `solar-pro2` agent-mode session covering the natural-language → kernel
+> path: cache hit, `spawn` confirm-escape allow/deny, jailed `NICE` denied, file
+> WRITE/READ with conversation memory, and `PS` with `[K]`/`[A]` class markers.
+
 Every transcript below is **real run output** (`solar-pro2`, smp=1).
 
 ### 5.1 Repeated question → kernel cache hit
