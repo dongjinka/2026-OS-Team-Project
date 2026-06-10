@@ -1,10 +1,19 @@
+<div align="center">
+
 # OS for LLM — xv6-riscv 위의 에이전트 런타임
 
-**2026 운영체제 · 팀 텀 프로젝트 · Direction A (OS for LLM).**
+**운영체제 · 2026 텀 프로젝트 · 팀 Last of OS** &nbsp;·&nbsp; Direction A
+김세중 · 김승범 · 공성준 · 가동진
+
 자연어가 키보드이고, 커널이 신뢰 경계다.
 
-> **발표 슬라이드 (라이브):** <https://dongjinka.github.io/2026-OS-Team-Project/>
-> English README: [README.md](README.md)
+라이브 덱: https://dongjinka.github.io/2026-OS-Team-Project/ &nbsp;·&nbsp; English: [README.md](README.md)
+
+[아키텍처](#1-아키텍처) · [OS 개념](#2-적용한-os-개념) · [빠른 시작](#3-빠른-시작) · [실행 방법](#4-실행-방법) · [데모](#5-데모) · [검증](#6-검증-요약) · [산출물](#10-산출물--문서) · [팀](#11-팀)
+
+</div>
+
+---
 
 **xv6-riscv** 교육용 커널을 확장해 LLM 에이전트(Upstage Solar)를 **호스팅·스케줄링·
 샌드박싱·캐싱**하도록 만들었다. *AIOS: LLM Agent Operating System* 논문의 세 컴포넌트를
