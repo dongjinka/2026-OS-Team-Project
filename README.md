@@ -276,9 +276,10 @@ you ▸ lower the priority of process 1 to 19
 
 The four captures below sit alongside the three already inlined in §5.2 (`spawn`
 allow/deny + `NICE` on `init`) and the one in §5.1 (cache hit) — eight in total,
-all real `solar-pro2` runs through `agent.py`, captured 2026-06-08. The asciinema
-recording recipe and the still-missing GIF / `priority_test` / `cfs_share`
-candidates are listed in [`docs/assets/README.md`](docs/assets/README.md).
+all real `solar-pro2` runs through `agent.py`, captured 2026-06-08. The
+end-to-end recording is the Google Drive video linked at the top of §5; the
+remaining `priority_test` / `cfs_share` console captures (still to come) and an
+asciinema recording recipe are in [`docs/assets/README.md`](docs/assets/README.md).
 
 | Prompt the user typed | What the kernel did | Capture |
 | --- | --- | --- |

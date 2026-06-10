@@ -264,8 +264,9 @@ you ▸ pid 1 프로세스의 우선순위를 19로 낮춰줘
 
 아래 4장은 §5.2의 3장(`spawn` 허용/거부 + `init` `NICE` 거부)과 §5.1의 1장(캐시
 hit)에 더해 총 8장 중 4장이다 — 모두 2026-06-08에 `solar-pro2` + `agent.py`
-라이브 세션에서 캡처. 녹화 레시피(asciinema + agg)와 아직 안 들어온 GIF /
-`priority_test` / `cfs_share` 후보는 [`docs/assets/README.md`](docs/assets/README.md).
+라이브 세션에서 캡처. End-to-end 녹화는 §5 상단의 Google Drive 영상으로 대체된다;
+아직 안 들어온 `priority_test` / `cfs_share` 콘솔 캡처 후보와 asciinema 녹화
+레시피는 [`docs/assets/README.md`](docs/assets/README.md).
 
 | 사용자가 입력한 프롬프트 | 커널이 한 일 | 캡처 |
 | --- | --- | --- |
