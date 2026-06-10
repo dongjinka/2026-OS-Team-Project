@@ -23,7 +23,7 @@
 | **Se-Joong Kim** (김세중) | `Sejoong` | Integration & lead: host↔xv6 socket, Solar API + REPL, CFS+dispatcher integration, jail-based sandbox rewrite, semantic cache (F9), **confirm-escape v1 → v2**, **`spawn` verb + `populate_jail`**, **`ralph_battery` + `ralph_natlang` regression pair (65/65 GREEN)** |
 | **SeungBeom Kim** (김승범, `server3342`) | `SeungBeom` | Core LLM-OS features: CFS/priority/sandbox/agent loop, configurable deny-list, security guards, self-observation commands (PS/HELP), F9 cache wiring; **2026-06-04 (PR #13) — audit fixes #1·#3·#4 landed on `main`** (`sys_dispatch` `is_agent` guard, `sys_setpriority` `is_agent && pid != self` guard, `agent.py:_wire_escape` coverage for `read`/`write`/`spawn`); **2026-06-09 (PR #17/#18) — major doc consolidation** (`docs/SECURITY.md` single reference merging `SECURITY_AND_EVALUATION.md` + `SECURITY_AUDIT.md`, new `docs/UNIT_IO_MATRIX.md` unit-IO matrix + new `CLAUDE.md` agent guide, `Weekly_Development_Process.md` archived, `plan.md` archive header, file:line accuracy pass across docs) |
 | **June Kong** (공성준, `SJ-Kong` / `June Kong` — `june020110@gmail.com` / `steady11317@gmail.com`) | `june_os` | Evaluation automation (Test 3 auto-verify, `cfs_share`), documentation (Implementation.md, CHANGELOG, English deliverables — README/Technical Report/Development Process), F6 design decision; **2026-06-04 (`e8ac26b`) — Technical Report + Development Process re-sync** with confirm-escape v2 / `spawn` / ralph 65/65 / 06-04 adversarial audit; **2026-06-08 (`70858a0`) — demo capture: 8 live `solar-pro2` PNGs + inlined into README §5 and Technical Report §4.4/§6.2/§6.6**; **2026-06-09 (`5e5b2c3`) — end-to-end demo video (Google Drive) linked from README §5 + accuracy review of the post-PR-#12 changes (CHANGELOG-tracked)** |
-| **Dongjin Ka** (가동진) | `Dongjin` *(repo owner)* | Repository setup & PR hosting; **2026-06-04 — adversarial security audit (7 dimensions, 16 confirmed findings) + red-team harness `tools/sec_audit.py` + reproduction binary `user/secnice.c`** — additive only under the `main` 불변 rule; **2026-06-05 (PR #15) — README reconstruction** (`README.md` = EN primary + `README.ko.md` = KR companion, deletes `README.en.md`), **`agent.py` answers in the user's question language** (`bfae744`), **`kernel/memlayout.h` per-process kernel stack 4 KB → 32 KB** (`KSTACK_PAGES 8`, `3249dff`) to close the agent/spawn `exec`-chain overflow, security/eval doc consolidation polish (`b202df0`) |
+| **Dongjin Ka** (가동진) | `Dongjin` *(repo owner)* | Repository setup & PR hosting; **2026-06-04 — adversarial security audit (7 dimensions, 16 confirmed findings) + red-team harness `tools/sec_audit.py` + reproduction binary `user/secnice.c`** — additive only under the `main` 불변 rule; **2026-06-05 (PR #15) — README reconstruction** (`README.md` = EN primary + `README.ko.md` = KR companion, deletes `README.en.md`), **`agent.py` answers in the user's question language** (`bfae744`), **`kernel/memlayout.h` per-process kernel stack 4 KB → 32 KB** (`KSTACK_PAGES 8`, `3249dff`) to close the agent/spawn `exec`-chain overflow, security/eval doc consolidation polish (`b202df0`); **2026-06-10 (PR #20/#21/#22) — Deliverable #4 lands**: 2,719-line `slides/OS for LLM.html` (reveal.js deck) + 영어/한국어 발표 스크립트 (`presentation-script.md`/`OS_presentation_script.md`) + `presentation-guide.md`, **GitHub Pages** 라이브 deck 호스팅 (`gh-pages` branch → <https://dongjinka.github.io/2026-OS-Team-Project/>), README 헤더를 centered 팀명·4인 한글 이름·section TOC + Live-deck 링크로 재작업 |
 
 > *(KR: 역할은 git 이력에서 추론. 실제와 다르면 이 표를 직접 수정할 것.)*
 
@@ -85,10 +85,11 @@ in-kernel IPC queue, and the file system — see
 | **12** | ~05-18 → 05-22 | Integrated prototype + ≥1 eval metric | **Core LLM-OS features** (`30c81dc`, 05-18 — CFS/priority/sandbox/agent loop); **eval automation** Test 3 + `cfs_share` + CHANGELOG + Implementation.md rewrite + `.gitignore` mkfs fix (`f3807d4`/`66a45e1`/`2e0664b`/`1a252d4`, 05-20); **jail-based sandbox** rewrite (`26d9269`, 05-21); **F9 cache** port + command-path wiring (`76b2737`/`7d4dd19`/`5fd0d44`, 05-22); **security guards** NICE + `sys_procinfo` (`a59ee1f`, 05-22); **AI self-observation** PS/HELP (`ad6cd20`, 05-22); configurable deny-list (`13030e0`, 05-22); semantic cache → word-level Jaccard (`c436131`, 05-22) |
 | **13a** | ~05-26 | First hardening round | **9-test regression harness** + 3 latent-bug fixes (`05bbe38`, 05-26); REPL backspace fix (`7a539b0`); **confirm-escape v1** (`ac013d6`); agent.py `run_tool` timeout 12 s → 24 s + marker retry (`c77e0a6`); jail confirm-escape branch **temporarily disabled** to dodge a `kerneltrap` panic (`40bf608`); PR #10 merged 05-26 |
 | **13b** | ~05-28 → 05-31 | Natural-language stabilisation + doc sync | **Confirm-escape v2** (sleep/wakeup on dedicated channel, `clockintr` timeout, inline `try_inline_confirm_res` bypass of the queue); **`spawn` tool verb** + `populate_jail()` hard-link of core binaries; `console.c` `REQ\|` payload echo skip (wire byte-race fix); `_cache_lookup` strip-normalize (Issue A — same prompt now hits on 2nd call); **two new regression harnesses** — `tools/ralph_battery.py` (26 shell/syscall scenarios, port 5555) + `tools/ralph_natlang.py` (39 NL scenarios, port 6666); **cumulative 65 / 65 GREEN** (`574c3d7`, 05-28; PR #11 merged 05-28). Doc consistency pass `b51938a` (05-31) updated CHANGELOG·Implementation·README.en·Weekly to match. **English deliverables (README.en + Technical Report + Development Process) committed** (`8ee2db7`, 05-28; PR #12 merged 05-31) |
-| **14** | 2026-06-04 → final presentation | **Final presentation** (English) + audit pass | **Adversarial security audit** (`24202ad`/`c9e2875`, 06-04 — now orphaned/unreachable, superseded by the 06-05 consolidated docs) — 7 dimensions, 16 confirmed findings, 1 reproduced by `tools/sec_audit.py`; **main 불변** principle (audit is additive; fixes ship as separate PRs). **Demo media captured 2026-06-08** (June, `70858a0`) — 8 PNGs of real `solar-pro2` agent-mode sessions landed in [`docs/assets/`](../docs/assets/) (cache HIT, confirm-escape allow/deny, `NICE` denied on `init`, `populate_jail` ls, PS `[K]`/`[A]`, WRITE, READ + conversation memory); README §5.1/§5.2/§5.3 and Technical Report §4.4/§6.2/§6.6 render them inline. **2026-06-09** (June) — end-to-end **demo video** (Google Drive) linked from README §5 + accuracy review of the post-PR-#12 changes recorded in `CHANGELOG.md`. Still pending: **English slides (Deliverable #4)**, asciinema GIF. |
+| **14** | 2026-06-04 → final presentation | **Final presentation** (English) + audit pass + Deliverable #4 | **Adversarial security audit** (`24202ad`/`c9e2875`, 06-04 — now orphaned/unreachable, superseded by the 06-05 consolidated docs) — 7 dimensions, 16 confirmed findings, 1 reproduced by `tools/sec_audit.py`. **Demo media captured 2026-06-08** (June, `70858a0`) — 8 PNGs of real `solar-pro2` agent-mode sessions inlined into README §5.1/§5.2/§5.3 and Technical Report §4.4/§6.2/§6.6. **2026-06-09** (June, `5e5b2c3`) — end-to-end **demo video** (Google Drive) linked from README §5 + accuracy review of post-PR-#12 changes. **2026-06-10 (PR #20/#21/#22, Dongjin) — Deliverable #4 landed**: `slides/OS for LLM.html` (2,719-line reveal.js deck) + EN/KR presentation scripts + presentation-guide; **GitHub Pages** live deck at <https://dongjinka.github.io/2026-OS-Team-Project/> (`gh-pages` branch); README headers reworked to centered team-name + 4-member 한글 이름 + section TOC + Live-deck banner. Still pending: rehearse the English presentation; (optionally) close audit findings #2 (cache jail-root) and #5 (deny-list SPAWN). |
 
-*(KR: 오늘 기준(2026-06-04, Week 14). 남은 일: 영어 슬라이드, 데모 캡처,
-보안 감사 발견 #1·#2·#3·#4 별도 PR 정리.)*
+*(KR: 오늘 기준 2026-06-10, Week 14. **4개 산출물 모두 main에 적재 완료** —
+영어 슬라이드(`slides/`) + GitHub Pages 라이브 deck까지. 남은 일은 영어 발표
+리허설과 (선택) 잔여 감사 #2·#5 정리뿐.)*
 
 ---
 
@@ -160,8 +161,22 @@ in-kernel IPC queue, and the file system — see
   **additive** to main; main is held
   invariant under the "main 불변" rule so the audit is reproducible against
   `cc40a08`. Actual fixes will ship as separate PRs.
-- Team-wide remaining work: English slides (Deliverable #4), demo capture
-  (asciinema → GIF for `docs/media/`), and triage of the audit findings.
+- **June: demo capture + accuracy review** (`70858a0` 06-08; `5e5b2c3`
+  06-09) — 8 PNGs of live `solar-pro2` agent-mode sessions inlined into
+  README §5 and Technical Report §4.4/§6.2/§6.6, followed by a Google
+  Drive end-to-end demo video linked from README §5 and a documentation
+  accuracy ralph review across the post-PR-#12 ancillary docs.
+- **Dongjin: Deliverable #4 lands (06-10)** — PR #20 (`4bbdaa0`) adds
+  `slides/OS for LLM.html` (2,719-line reveal.js) + EN/KR presentation
+  scripts + presentation-guide; PR #21 (`662f76c`/`1a28f04`) cleans up the
+  slides layout (canonical `slides/`, thumbnail rail hidden); PR #22
+  (`a64279a`/`013e96b`) publishes the deck on **GitHub Pages**
+  (<https://dongjinka.github.io/2026-OS-Team-Project/>) and reworks both
+  READMEs into a centered header with team-name *"Last of OS"*, 4-member
+  한글 이름, section TOC, and a Live-deck banner.
+- Team-wide remaining work: **rehearse the English presentation**;
+  (optional) close audit findings #2 (`/cache.bin` jail-root) and #5
+  (deny-list default doesn't cover `SPAWN`).
 
 ### 4.2 Evaluation metrics defined
 
@@ -191,20 +206,20 @@ in-kernel IPC queue, and the file system — see
 > 실제 참석자·구두 결정은 `[fill in]`을 채워 완성할 것.)*
 
 ### M1 — Week 9 · Kickoff (around 2026-04-30)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** Direction A (OS for LLM); adopt AIOS three-component framing;
   set up the GitHub repo and personal-branch + PR workflow.
 - **Action items:** Se-Joong → host↔xv6 transport spike; everyone → read AIOS.
 
 ### M2 — Week 10–11 · Architecture (around 2026-05-05 → 05-11)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** QEMU serial-over-TCP as the bridge transport; CFS as the
   scheduler; in-tree xv6 (drop submodule). Block-diagram sketch agreed.
 - **Action items:** Se-Joong → CFS + dispatcher prototype; define the `REQ|`
   wire protocol.
 
 ### M3 — Week 12 · Integration & sandbox direction (around 2026-05-18 → 05-22)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** consolidate features (SeungBeom's core set) on main; move
   sandboxing to a **chroot `jail()`** model; add **F9 cache**; **F6 → parse JSON
   on the host** (rationale recorded in the report); split docs into
@@ -213,7 +228,7 @@ in-kernel IPC queue, and the file system — see
   guards; Se-Joong → jail rewrite + cache.
 
 ### M4 — Week 13a · Hardening & dry-run (around 2026-05-26)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** add a regression harness before the dry-run; gate dangerous
   syscalls behind a one-time host confirmation (confirm-escape v1); freeze
   scope (F9 in, F10 out).
@@ -222,7 +237,7 @@ in-kernel IPC queue, and the file system — see
   final deliverable**.
 
 ### M5 — Week 13b · Natural-language stabilisation (around 2026-05-28 → 05-31)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** **replace confirm v1 with v2** (sleep/wakeup on a dedicated
   channel + inline `try_inline_confirm_res()`); promote regression to a
   **two-harness pair** (`ralph_battery` + `ralph_natlang`) with isolated ports
@@ -237,7 +252,7 @@ in-kernel IPC queue, and the file system — see
   reports.
 
 ### M6 — Week 14 · Adversarial audit + final prep (around 2026-06-04)
-- **Attendees:** `[fill in]`
+- **Attendees:** Se-Joong Kim (김세중), SeungBeom Kim (김승범), June Kong (공성준), Dongjin Ka (가동진) — 전원
 - **Decisions:** keep `main` invariant under the audit ("main 불변");
   Dongjin's audit + red-team harness land as commits `24202ad`/`c9e2875`
   (later orphaned/superseded; their content now lives in the consolidated
@@ -249,8 +264,13 @@ in-kernel IPC queue, and the file system — see
 - **Action items:** triage the 4 HIGH/MEDIUM findings into ordered PRs
   (#1 confirm self-resolve → #2 cache jail-root → #3 NICE self-scope → #4
   wire-escape coverage); produce the **English presentation slides**
-  (Deliverable #4); capture demo media (`docs/media/`); rehearse the
-  presentation in English.
+  (Deliverable #4); capture demo media; rehearse the presentation in English.
+- **Outcome (06-04 → 06-10):** PRs #13/#14 closed audit fixes #1/#3/#4 on
+  `main` (reproducer `SAFE`); demo media captured 06-08 (8 PNGs + Google
+  Drive video, June); **Deliverable #4 landed 06-10 via PR #20/#21/#22**
+  (Dongjin) — `slides/OS for LLM.html` + GitHub Pages live deck at
+  <https://dongjinka.github.io/2026-OS-Team-Project/>. Only English-presentation
+  rehearsal and (optionally) audit findings #2 / #5 remain.
 
 ---
 
@@ -325,20 +345,19 @@ All entries are real and traceable to commits / `CHANGELOG.md`.
   been cheaper to fix while the surrounding code was still being written.
 
 ### Remaining before the final presentation *(남은 일)*
-- **English presentation slides** (Deliverable #4) — not yet started.
-- **Demo capture (PNG done 2026-06-08, GIF still pending).** 8 PNGs of live
-  `solar-pro2` agent-mode sessions are in [`../docs/assets/`](../docs/assets/)
-  (cache HIT, confirm-escape allow/deny, `NICE` denied on `init`, `populate_jail`
-  listing, PS `[K]`/`[A]` markers, WRITE, READ + conversation memory) — README
-  §5.1/§5.2/§5.3 and Technical Report §4.4/§6.2/§6.6 render them inline. An
-  asciinema → GIF of the full ReAct loop is the remaining piece.
-- **Audit triage** (against the findings in `docs/SECURITY.md`) — at minimum land PRs for
-  findings #1 (confirm self-resolve), #2 (cache jail-root), #3 (NICE
-  self-scope), #4 (wire-escape gaps). Each PR must keep the 65 / 65 baseline.
-- Final rehearsal of the English presentation.
+- **English presentation rehearsal** — slides + script already on `main`
+  (`slides/OS for LLM.html` + EN/KR scripts; live deck at
+  <https://dongjinka.github.io/2026-OS-Team-Project/>); the spoken delivery
+  in English is what remains.
+- (Optional) **Two audit findings still open** — #2 (`/cache.bin` resolves
+  under `jail_root`) and #5 (deny-list default doesn't cover `SPAWN`); both
+  documented in [`SECURITY.md`](SECURITY.md) §2 with mitigation plans.
+  Closing them is *defense-in-depth nice-to-have*, not a blocker (the
+  reproducer already reports `SAFE` for #1·#3·#4).
 
-> *(KR: 제출 전 반드시 — 영어 슬라이드 작성, asciinema GIF 캡처(PNG 8장은
-> 06-08에 들어옴), 보안 감사 4건 별도 PR 정리, 영어 리허설.)*
+> *(KR: 제출 전 남은 일 — **영어 발표 리허설**만 필수. 4개 산출물 모두 main에
+> 적재 완료(README + Tech Report + Dev Process + slides/Live deck). 잔여 감사
+> #2 / #5 정리는 defense-in-depth, blocker 아님.)*
 
 ---
 

@@ -41,6 +41,34 @@
   기능별 입력→기대 출력 매트릭스) 행 추가 — 새 main 추가 검증 자료의 라우팅
   복원.
 
+### Changed (2026-06-10 — June, 회의록 채움 + Deliverable #4 main 반영)
+- **`docs/Development_Process.md` §5 Meeting Notes M1~M6 Attendees** —
+  6곳 모두 `[fill in]` → *Se-Joong Kim (김세중), SeungBeom Kim (김승범),
+  June Kong (공성준), Dongjin Ka (가동진) — 전원* 으로 채움 (커밋은 특정인이
+  했어도 회의·논의는 전원 참여).
+- **`docs/Development_Process.md` §1 Roles Dongjin 행** — 06-10 PR #20/#21/#22
+  (`slides/OS for LLM.html` 2,719줄 reveal.js + EN/KR scripts +
+  presentation-guide + GitHub Pages 라이브 deck + README header 재작업)
+  추가.
+- **`docs/Development_Process.md` §3 Timeline Week 14 행** —
+  *"Still pending: English slides, asciinema GIF"* 표현 제거.
+  PR #20/#21/#22 narrative + GitHub Pages URL 추가. KR 주석도 *"4개
+  산출물 모두 main에 적재 완료, 남은 일은 영어 발표 리허설 + (선택) 잔여
+  감사 #2/#5"* 로 정합.
+- **`docs/Development_Process.md` §4 Week 14 execution** — Team-wide
+  remaining work 단락을 *"rehearse English presentation; (optional) audit
+  #2/#5"* 로 축소 + June 06-08~06-09 narrative + Dongjin 06-10 PR #20/#21/#22
+  narrative 추가.
+- **`docs/Development_Process.md` §5 M6 Outcome** — Dongjin 06-10 PR
+  #20/#21/#22 (Deliverable #4 landing) 결과 한 줄 추가.
+- **`docs/Development_Process.md` §7 Remaining before final** — *"English
+  slides not yet started", "asciinema GIF pending", "audit triage 4건",
+  "smp>1 재테스트"* 표현 모두 제거. **남은 일은 "영어 발표 리허설" 1건 +
+  (선택) 잔여 감사 #2/#5** 로 정정.
+- **`docs/README.md` 인덱스 #4 행** — `slides/ *(to be added)*` →
+  `[Live deck →](https://dongjinka.github.io/2026-OS-Team-Project/)` + 소스
+  `slides/OS for LLM.html` + EN/KR scripts 경로.
+
 ### Added (2026-06-09 — June)
 - **End-to-end 데모 비디오 (Google Drive) 링크** — `README.md` §5 + `README.ko.md` §5
   헤더에 배너로 박음 + `docs/assets/README.md` 인덱스에도 외부 미디어로 표시.

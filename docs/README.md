@@ -11,7 +11,7 @@ This folder holds the detailed reports and the security/evaluation evidence.
 | 1 | Application + source + how-to-run | root [`README.md`](../README.md) (EN, primary) + [`README.ko.md`](../README.ko.md) (KR) + repository |
 | 2 | Technical Report (EN) | [`Technical_Report.md`](Technical_Report.md) |
 | 3 | Development Process (EN) | [`Development_Process.md`](Development_Process.md) |
-| 4 | Presentation slides (EN) | `slides/` *(to be added)* |
+| 4 | Presentation slides (EN) | [Live deck →](https://dongjinka.github.io/2026-OS-Team-Project/) · source [`slides/OS for LLM.html`](../slides/OS%20for%20LLM.html) + EN/KR scripts under [`slides/`](../slides/) |
 
 ## Security & Evaluation (companion docs)
 | Topic | Start here | Full detail |
