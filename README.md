@@ -1,10 +1,19 @@
+<div align="center">
+
 # OS for LLM — an agent runtime on xv6-riscv
 
-**2026 Operating Systems · team term project · Direction A (OS for LLM).**
+**Operating Systems · 2026 Term Project · Team Last of OS** &nbsp;·&nbsp; Direction A
+김세중 · 김승범 · 공성준 · 가동진
+
 Natural language is the keyboard; the kernel is the trust boundary.
 
-> **Live presentation deck:** <https://dongjinka.github.io/2026-OS-Team-Project/>
-> 한국어 README: [README.ko.md](README.ko.md)
+Live deck: https://dongjinka.github.io/2026-OS-Team-Project/ &nbsp;·&nbsp; 한국어: [README.ko.md](README.ko.md)
+
+[Architecture](#1-architecture) · [OS concepts](#2-os-concepts-in-play) · [Quick start](#3-quick-start) · [How to run](#4-how-to-run) · [Demo](#5-demo) · [Verification](#6-verification-at-a-glance) · [Deliverables](#10-deliverables--documents) · [Team](#11-team)
+
+</div>
+
+---
 
 We extend the **xv6-riscv** teaching kernel so it can **host, schedule, sandbox, and
 cache an LLM agent** (Upstage Solar). The three components of the *AIOS: LLM Agent
